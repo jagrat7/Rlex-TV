@@ -9,5 +9,6 @@ mod addons;
 mod store;
 mod watch;
 mod library;
+mod torrent;
 
 fn main() {}
