@@ -6,5 +6,7 @@
 
 mod runtime;
 mod addons;
+mod store;
+mod watch;
 
 fn main() {}
