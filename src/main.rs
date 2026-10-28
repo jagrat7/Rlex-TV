@@ -10,5 +10,6 @@ mod store;
 mod watch;
 mod library;
 mod torrent;
+mod player;
 
 fn main() {}
