@@ -8,5 +8,6 @@ mod runtime;
 mod addons;
 mod store;
 mod watch;
+mod library;
 
 fn main() {}
