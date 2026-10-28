@@ -5,5 +5,6 @@
 #![allow(dead_code)]
 
 mod runtime;
+mod addons;
 
 fn main() {}
