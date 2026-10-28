@@ -11,5 +11,6 @@ mod watch;
 mod library;
 mod torrent;
 mod player;
+mod state;
 
 fn main() {}
