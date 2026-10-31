@@ -247,7 +247,11 @@ impl Render for DownloadsView {
             };
             (state.torrents(), status)
         };
-        let ready = matches!(self.state.read(cx).engine, EngineStatus::Ready(_));
+        // The engine starts lazily, so "off" also means nothing downloading.
+        let idle = matches!(
+            self.state.read(cx).engine,
+            EngineStatus::Ready(_) | EngineStatus::Off
+        );
         let rows: Vec<Div> = torrents
             .into_iter()
             .map(|torrent| self.torrent_row(torrent, cx))
@@ -257,7 +261,7 @@ impl Render for DownloadsView {
             .child(page_title("Downloads"))
             .when_some(status, |this, status| this.child(status))
             .map(|this| {
-                if rows.is_empty() && ready {
+                if rows.is_empty() && idle {
                     this.child(empty_state(
                         IconName::Download,
                         "Nothing downloading",
