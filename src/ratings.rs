@@ -20,7 +20,7 @@ use crate::store;
 pub const TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// How soon scores cached after a failed OMDb request are asked for again.
-const RETRY_SECS: u64 = 60 * 60;
+pub const RETRY_SECS: u64 = 60 * 60;
 
 /// Where users get a free key.
 pub const KEY_URL: &str = "https://www.omdbapi.com/apikey.aspx";

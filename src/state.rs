@@ -685,8 +685,22 @@ struct RatingsState {
     sources: Sources,
     in_flight: HashMap<String, RatingsFetch>,
     /// The OMDb key itself failed (invalid, or out of quota). Only Wikidata
-    /// is asked until the key changes, so a bad key doesn't burn requests.
-    key_error: Option<String>,
+    /// is asked until the key changes or the problem expires, so a bad key
+    /// doesn't burn requests.
+    key_error: Option<KeyError>,
+}
+
+struct KeyError {
+    message: String,
+    /// Unix seconds when the key is tried again. A shared built-in key gets
+    /// its daily quota back, so a failure isn't forever.
+    retry_at: u64,
+}
+
+impl KeyError {
+    fn active(&self) -> bool {
+        store::now() < self.retry_at
+    }
 }
 
 impl RatingsState {
@@ -727,8 +741,7 @@ impl AppState {
         {
             return Task::ready(Ok(Some(entry.ratings.clone())));
         }
-        // A key that already failed isn't tried again until it changes.
-        let key = self.omdb_key().filter(|_| self.ratings.key_error.is_none());
+        let key = self.usable_omdb_key();
 
         let fetch = match self.ratings.in_flight.get(imdb_id) {
             Some(fetch) => fetch.clone(),
@@ -766,7 +779,9 @@ impl AppState {
         // If the key changed meanwhile, this may drop a newer fetch for the
         // same title; that only costs sharing it.
         self.ratings.in_flight.remove(imdb_id);
-        let same_key = self.omdb_key().filter(|_| self.ratings.key_error.is_none()) == key;
+        let same_key = self.usable_omdb_key() == key;
+        // A key exists but was held back because it had failed.
+        let held_back = key.is_none() && self.omdb_key().is_some();
         let (ratings, omdb_error) = match result {
             Ok(Fetched {
                 ratings,
@@ -782,17 +797,29 @@ impl AppState {
                 .is_some_and(OmdbError::is_key_error);
             if key_problem && same_key {
                 log::warn!("ratings: {message}");
-                self.ratings.key_error = Some(message.clone());
-            } else {
-                // Offline or a hiccup: what Wikidata had, until OMDb answers.
-                retry_soon = true;
+                self.ratings.key_error = Some(KeyError {
+                    message: message.clone(),
+                    retry_at: store::now() + crate::ratings::RETRY_SECS,
+                });
             }
+            // Whatever went wrong, keep what Wikidata had until OMDb answers.
+            retry_soon = true;
             message
         });
         let Some(ratings) = ratings else {
             cx.notify();
             return Err(message.unwrap_or_default());
         };
+        // Scores fetched for an older key may lack what the new one adds;
+        // the next view fetches again.
+        if !same_key {
+            cx.notify();
+            return Ok(Some(ratings));
+        }
+        // Without a key that is only resting, OMDb may add more soon.
+        if !ratings.has_critics() && held_back {
+            retry_soon = true;
+        }
         if retry_soon {
             self.ratings.cache.insert_briefly(imdb_id, ratings.clone());
         } else {
@@ -824,7 +851,8 @@ impl AppState {
 
     /// Why the OMDb key isn't working, if it isn't.
     pub fn ratings_error(&self) -> Option<&str> {
-        self.ratings.key_error.as_deref()
+        let error = self.ratings.key_error.as_ref().filter(|e| e.active())?;
+        Some(error.message.as_str())
     }
 
     /// Checks `key` (blank: the key in use) with one OMDb request, without
@@ -873,5 +901,15 @@ impl AppState {
     fn omdb_key(&self) -> Option<String> {
         self.own_omdb_key()
             .or_else(|| crate::ratings::built_in_key().map(str::to_string))
+    }
+
+    /// [`Self::omdb_key`], unless it failed within the last hour.
+    fn usable_omdb_key(&self) -> Option<String> {
+        let resting = self
+            .ratings
+            .key_error
+            .as_ref()
+            .is_some_and(KeyError::active);
+        self.omdb_key().filter(|_| !resting)
     }
 }
