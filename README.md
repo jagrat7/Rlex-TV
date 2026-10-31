@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo/rlex-256.png" width="128" height="128" alt="Rlex">
+</p>
+
 # Rlex
 
 A lean media center for the desktop, written in Rust with [GPUI](https://gpui.rs) and
@@ -32,6 +36,16 @@ Requirements (Linux, X11 or Wayland):
 ```sh
 cargo run --release
 ```
+
+To get a launcher entry and the app icon in your dock (Wayland compositors find it through
+the desktop entry's `app_id`):
+
+```sh
+cargo build --release && scripts/install-desktop.sh
+```
+
+This puts the binary in `~/.local/bin`, the desktop entry in `~/.local/share/applications`,
+and the icons from `assets/logo/` into the hicolor theme.
 
 ## How playback and progress work
 

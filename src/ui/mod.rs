@@ -15,6 +15,8 @@ mod search;
 mod settings;
 mod shell;
 
+use std::sync::{Arc, OnceLock};
+
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 
@@ -22,6 +24,31 @@ use crate::addons::Meta;
 use crate::library::LibraryTitle;
 use crate::state::AppState;
 use crate::watch::WatchEntry;
+
+fn logo() -> Arc<Image> {
+    static LOGO: OnceLock<Arc<Image>> = OnceLock::new();
+    LOGO.get_or_init(|| {
+        Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            include_bytes!("../../assets/logo/rlex-128.png").to_vec(),
+        ))
+    })
+    .clone()
+}
+
+/// The app icon, baked into the binary. X11 shows it on the window; on
+/// Wayland the compositor looks the icon up by `app_id` through the desktop
+/// entry in `assets/linux/` instead.
+fn window_icon() -> Option<Arc<image::RgbaImage>> {
+    const PNG: &[u8] = include_bytes!("../../assets/logo/rlex-256.png");
+    match image::load_from_memory_with_format(PNG, image::ImageFormat::Png) {
+        Ok(img) => Some(Arc::new(img.into_rgba8())),
+        Err(err) => {
+            log::warn!("window icon won't show: {err:#}");
+            None
+        }
+    }
+}
 
 pub fn open_main_window(state: Entity<AppState>, cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
@@ -33,6 +60,7 @@ pub fn open_main_window(state: Entity<AppState>, cx: &mut App) {
         }),
         window_min_size: Some(size(px(960.), px(600.))),
         app_id: Some("rlex".into()),
+        icon: window_icon(),
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, |window, cx| {

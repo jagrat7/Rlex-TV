@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rust for a Node full-stack developer, through Rlex</title>
+<style>
+  :root {
+    --bg: var(--background, #FCFBF8); --ink: var(--foreground, #16151A); --mut: var(--muted-foreground, #6E6A73);
+    --line: var(--border, #E4DFD6); --panel: var(--card, #FFFFFF); --code: var(--code-background, #F4F1EA); --link: var(--accent, #5B3FE0);
+    --sans: var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+    --mono: var(--font-mono, ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace);
+    --a: #DE6A2B; --b: #5FA04E;
+    --p1: #7B5CFF; --p2: #0F9F8F; --p3: #E5487A; --p4: #C99A06; --p5: #64748B;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: var(--background, #141318); --ink: var(--foreground, #ECEAF0); --mut: var(--muted-foreground, #9A96A0);
+            --line: var(--border, #2E2C35); --panel: var(--card, #1C1B21); --code: var(--code-background, #23222B); --link: var(--accent, #A894FF); }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); font: 15px/1.55 var(--sans); }
+  html.standalone body { background: var(--bg); }
+  html.standalone main { max-width: 960px; margin: 0 auto; padding: 40px 24px 64px; }
+  .only-sa { display: none; } html.standalone .only-sa { display: block; }
+  h1 { font-size: 30px; line-height: 1.15; letter-spacing: -.02em; margin: 0 0 8px; }
+  h2 { font-size: 18px; margin: 40px 0 12px; display: flex; align-items: center; gap: 10px; }
+  h2:first-of-type { margin-top: 18px; }
+  h2 .n { font-size: 12px; font-weight: 700; color: var(--mut); border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px; }
+  h3 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  p { margin: 0 0 10px; } a { color: var(--link); text-underline-offset: 2px; }
+  code { font: 12.5px/1.5 var(--mono); background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow-x: auto; margin: 0 0 10px; }
+  pre code { background: none; padding: 0; } .c { color: var(--mut); }
+  .lede { color: var(--mut); font-size: 16px; max-width: 660px; }
+  .src { font-size: 12.5px; color: var(--mut); margin-top: 10px; } .src a { color: var(--mut); }
+  .lg { width: 20px; height: 20px; vertical-align: -4px; flex: none; } .lg.big { width: 26px; height: 26px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; }
+  .card code { overflow-wrap: anywhere; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; } .grid2 > * { min-width: 0; }
+  @media (max-width: 660px) { .grid2 { grid-template-columns: 1fr; } }
+  .badge { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: #fff; font: 700 11px/1 var(--sans); flex: none; }
+  .k1 { background: var(--p1); } .k2 { background: var(--p2); } .k3 { background: var(--p3); } .k4 { background: var(--p4); } .k5 { background: var(--p5); }
+
+  .dg-wrap { overflow-x: auto; margin: 4px 0 14px; }
+  .dg { display: block; width: 100%; min-width: 600px; height: auto; }
+  .dg text { font-family: var(--sans); font-size: 12px; fill: var(--ink); }
+  .dg .m { font-family: var(--mono); font-size: 11.5px; } .dg .mut { fill: var(--mut); } .dg .b { font-weight: 700; font-size: 13px; }
+  .dg .sm { font-size: 10.5px; } .dg .mid { text-anchor: middle; } .dg .end { text-anchor: end; }
+  .dg .bn { fill: #fff; font-weight: 700; font-size: 10.5px; text-anchor: middle; }
+  .dg .dc { fill: var(--panel); stroke: var(--line); } .dg .tb { fill: var(--code); stroke: var(--line); }
+  .dg .ra { fill: var(--panel); stroke: var(--a); stroke-width: 1.5; } .dg .na { fill: var(--panel); stroke: var(--b); stroke-width: 1.5; }
+  .dg .ln { stroke: var(--mut); stroke-width: 1.5; fill: none; } .dg .dash { stroke-dasharray: 5 4; }
+  .dg .wt { fill: #fff; font-weight: 700; font-size: 11px; text-anchor: middle; }
+  .ah { fill: var(--mut); }
+
+  .parts { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .part { display: flex; gap: 10px; font-size: 13.5px; line-height: 1.45; } .part b { display: block; font-size: 14px; } .part .badge { margin-top: 2px; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+  .fact { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 99px; background: var(--panel); }
+
+  .mf { background: var(--code); border: 1px solid var(--line); border-radius: 10px; padding: 10px 0; overflow-x: auto; font: 12.5px/1.75 var(--mono); }
+  .mf div { display: flex; align-items: center; white-space: pre; padding-right: 16px; min-width: max-content; }
+  .mf .g { width: 34px; flex: none; display: grid; place-items: center; } .mf .g .badge { width: 17px; height: 17px; font-size: 10px; }
+  .mf .t1 { background: color-mix(in srgb, var(--p1) 12%, transparent); } .mf .t2 { background: color-mix(in srgb, var(--p2) 12%, transparent); }
+  .mf .t3 { background: color-mix(in srgb, var(--p3) 12%, transparent); } .mf .t4 { background: color-mix(in srgb, var(--p4) 14%, transparent); }
+  .mf .t5 { background: color-mix(in srgb, var(--p5) 14%, transparent); }
+  .mf-h { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; margin-bottom: 8px; }
+  .notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px 18px; margin-top: 12px; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; font-size: 14px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid var(--line); } tr:last-child td { border-bottom: 0; }
+  thead th { background: var(--code); } thead th span { display: inline-flex; align-items: center; gap: 8px; }
+  td:first-child { font-weight: 600; white-space: nowrap; color: var(--mut); font-size: 13px; }
+  td.a { box-shadow: inset 3px 0 color-mix(in srgb, var(--a) 55%, transparent); } td.b { box-shadow: inset 3px 0 color-mix(in srgb, var(--b) 55%, transparent); }
+  td code { overflow-wrap: anywhere; } td .c { font-size: 12.5px; display: block; }
+  .tbl-wrap { overflow-x: auto; }
+
+  .lane { --c: var(--mut); } .lane.a { --c: var(--a); } .lane.b { --c: var(--b); }
+  .lane + .lane { margin-top: 12px; }
+  .lane-h { display: flex; align-items: center; gap: 8px; font-weight: 700; margin-bottom: 10px; } .lane-h .tag { margin-left: auto; font-weight: 600; font-size: 12px; color: var(--c); border: 1px solid var(--c); border-radius: 99px; padding: 1px 10px; }
+  .steps { list-style: none; margin: 0; padding: 0; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; counter-reset: s; }
+  .steps li { counter-increment: s; position: relative; padding: 34px 6px 0; text-align: center; min-width: 0; }
+  .steps li::before { content: ""; position: absolute; top: 11px; left: 0; right: 0; height: 2px; background: var(--c); }
+  .steps li:first-child::before { left: 50%; } .steps li:last-child::before { right: 50%; }
+  .steps li::after { content: counter(s); position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 24px; height: 24px; border-radius: 50%; background: var(--c); color: #fff; font: 700 12px/24px var(--sans); text-align: center; }
+  .steps b { display: block; font-size: 13.5px; } .steps span { display: block; color: var(--mut); font-size: 12px; line-height: 1.35; }
+  @media (max-width: 620px) {
+    .steps { grid-auto-flow: row; grid-template-columns: 1fr; } .steps li { text-align: left; padding: 2px 0 14px 36px; }
+    .steps li::before { top: 0; bottom: 0; left: 11px; right: auto; width: 2px; height: auto; }
+    .steps li:first-child::before { top: 12px; left: 11px; } .steps li:last-child::before { bottom: auto; height: 12px; right: auto; }
+    .steps li::after { left: 0; transform: none; }
+  }
+
+  /* qualitative meters */
+  .meter { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 6px 10px; font-size: 13px; margin: 10px 0 4px; }
+  .meter .bar { height: 10px; border-radius: 99px; background: var(--code); border: 1px solid var(--line); overflow: hidden; }
+  .meter .bar i { display: block; height: 100%; border-radius: 99px; background: var(--c, var(--a)); }
+  .mode-h { display: flex; align-items: baseline; gap: 10px; } .mode-h code { font-size: 12px; }
+  footer { margin-top: 40px; font-size: 13px; color: var(--mut); border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="ah" d="M0 0L10 5L0 10z"/></marker></defs>
+  <symbol id="lg-rust" viewBox="0 0 224 224"><image href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGZpbGw9Im5vbmUiIHZpZXdCb3g9IjAgMCAyMjQgMjI0Ij48cGF0aCBmaWxsPSIjREU2QTJCIiBkPSJNMjE4LjQ2IDEwOS4zNThsLTkuMDYyLTUuNjE0Yy0uMDc2LS44ODItLjE2Mi0xLjc2Mi0uMjU4LTIuNjQybDcuODAzLTcuMjY1YTMuMTA3IDMuMTA3IDAgMDAuOTMzLTIuODkgMy4wOTMgMy4wOTMgMCAwMC0xLjk2Ny0yLjMxMmwtOS45Ny0zLjcxNWMtLjI1LS44NjMtLjUxMi0xLjcyLS43ODEtMi41OGw2LjIxNC04LjYyOGEzLjExNCAzLjExNCAwIDAwLS41OTItNC4yNjMgMy4xMzQgMy4xMzQgMCAwMC0xLjQzMS0uNjM3bC0xMC41MDctMS43MDlhODAuODY5IDgwLjg2OSAwIDAwLTEuMjYzLTIuMzUzbDQuNDE3LTkuN2EzLjEyIDMuMTIgMCAwMC0uMjQzLTMuMDM1IDMuMTA2IDMuMTA2IDAgMDAtMi43MDUtMS4zODVsLTEwLjY3MS4zNzJhODUuMTUyIDg1LjE1MiAwIDAwLTEuNjg1LTIuMDQ0bDIuNDU2LTEwLjM4MWEzLjEyNSAzLjEyNSAwIDAwLTMuNzYyLTMuNzYzbC0xMC4zODQgMi40NTZhODguOTk2IDg4Ljk5NiAwIDAwLTIuMDQ3LTEuNjg0bC4zNzMtMTAuNjcxYTMuMTEgMy4xMSAwIDAwLTEuMzg1LTIuNzA0IDMuMTI3IDMuMTI3IDAgMDAtMy4wMzQtLjI0NmwtOS42ODEgNC40MTdjLS43ODItLjQyOS0xLjU2Ny0uODU0LTIuMzUzLTEuMjY1bC0xLjcxMy0xMC41MDZhMy4wOTggMy4wOTggMCAwMC0xLjg4Ny0yLjM3MyAzLjEwOCAzLjEwOCAwIDAwLTMuMDE0LjM1bC04LjYyOCA2LjIxM2MtLjg1LS4yNy0xLjcwMy0uNTMtMi41Ni0uNzc4bC0zLjcxNi05Ljk3YTMuMTExIDMuMTExIDAgMDAtMi4zMTEtMS45NyAzLjEzNCAzLjEzNCAwIDAwLTIuODkuOTMzbC03LjI2NiA3LjgwMmE5My43NDYgOTMuNzQ2IDAgMDAtMi42NDMtLjI1OGwtNS42MTQtOS4wODJBMy4xMjUgMy4xMjUgMCAwMDExMS45NyA0Yy0xLjA5IDAtMi4wODUuNTYtMi42NDIgMS40NzhsLTUuNjE1IDkuMDgxYTkzLjMyIDkzLjMyIDAgMDAtMi42NDIuMjU5bC03LjI2Ni03LjgwMmEzLjEzIDMuMTMgMCAwMC0yLjg5LS45MzMgMy4xMDYgMy4xMDYgMCAwMC0yLjMxMiAxLjk3bC0zLjcxNSA5Ljk3Yy0uODU3LjI0Ny0xLjcxLjUwNi0yLjU2Ljc3OEw3My43IDEyLjU4OGEzLjEwMSAzLjEwMSAwIDAwLTMuMDE0LS4zNUEzLjEyNyAzLjEyNyAwIDAwNjguOCAxNC42MWwtMS43MTMgMTAuNTA2Yy0uNzkuNDEtMS41NzUuODMyLTIuMzUzIDEuMjY1bC05LjY4MS00LjQxN2EzLjEyNSAzLjEyNSAwIDAwLTQuNDIgMi45NWwuMzcyIDEwLjY3Yy0uNjkuNTUzLTEuMzczIDEuMTE1LTIuMDQ4IDEuNjg1bC0xMC4zODMtMi40NTZhMy4xNDMgMy4xNDMgMCAwMC0yLjkzLjgzMiAzLjEyNCAzLjEyNCAwIDAwLS44MzMgMi45M2wyLjQzNiAxMC4zODNhOTMuODk3IDkzLjg5NyAwIDAwLTEuNjggMi4wNDNsLTEwLjY3Mi0uMzcyYTMuMTM4IDMuMTM4IDAgMDAtMi43MDQgMS4zODUgMy4xMjYgMy4xMjYgMCAwMC0uMjQ2IDMuMDM1bDQuNDE4IDkuN2MtLjQzLjc3OS0uODU1IDEuNTYzLTEuMjY2IDIuMzUzbC0xMC41MDcgMS43MWEzLjA5NyAzLjA5NyAwIDAwLTIuMzczIDEuODg2IDMuMTE3IDMuMTE3IDAgMDAuMzUgMy4wMTNsNi4yMTQgOC42MjhhODkuMTIgODkuMTIgMCAwMC0uNzggMi41OGwtOS45NyAzLjcxNWEzLjExNyAzLjExNyAwIDAwLTEuMDM1IDUuMjAybDcuODAzIDcuMjY1Yy0uMDk4Ljg3OS0uMTg0IDEuNzYtLjI1OCAyLjY0MmwtOS4wNjIgNS42MTRBMy4xMjIgMy4xMjIgMCAwMDQgMTEyLjAyMWMwIDEuMDkyLjU2IDIuMDg0IDEuNDc4IDIuNjQybDkuMDYyIDUuNjE0Yy4wNzQuODgyLjE2IDEuNzYyLjI1OCAyLjY0MmwtNy44MDMgNy4yNjVhMy4xMTcgMy4xMTcgMCAwMDEuMDM0IDUuMjAxbDkuOTcgMy43MTZhMTEwIDExMCAwIDAwLjc4IDIuNThsLTYuMjEyIDguNjI3YTMuMTEyIDMuMTEyIDAgMDAuNiA0LjI3Yy40MTkuMzMuOTE2LjU0NyAxLjQ0My42M2wxMC41MDcgMS43MDljLjQwNy43OTIuODMgMS41NzYgMS4yNjUgMi4zNTNsLTQuNDE3IDkuNjhhMy4xMjYgMy4xMjYgMCAwMDIuOTUgNC40MmwxMC42NS0uMzc0Yy41NTMuNjkgMS4xMTUgMS4zNzIgMS42ODUgMi4wNDdsLTIuNDM1IDEwLjM4M2EzLjA5IDMuMDkgMCAwMC44MzEgMi45MSAzLjExNyAzLjExNyAwIDAwMi45MzEuODNsMTAuMzg0LTIuNDM2YTgyLjI2OCA4Mi4yNjggMCAwMDIuMDQ3IDEuNjhsLS4zNzEgMTAuNjcxYTMuMTEgMy4xMSAwIDAwMS4zODUgMi43MDQgMy4xMjUgMy4xMjUgMCAwMDMuMDM0LjI0MWw5LjY4MS00LjQxNmMuNzc5LjQzMiAxLjU2My44NTQgMi4zNTMgMS4yNjVsMS43MTMgMTAuNTA1YTMuMTQ3IDMuMTQ3IDAgMDAxLjg4NyAyLjM5NSAzLjExMSAzLjExMSAwIDAwMy4wMTQtLjM0OWw4LjYyOC02LjIxM2MuODUzLjI3MSAxLjcxLjUzNSAyLjU4Ljc4M2wzLjcxNiA5Ljk2OWEzLjExMiAzLjExMiAwIDAwMi4zMTIgMS45NjcgMy4xMTIgMy4xMTIgMCAwMDIuODktLjkzM2w3LjI2Ni03LjgwMmMuODc3LjEwMSAxLjc2MS4xODYgMi42NDIuMjY0bDUuNjE1IDkuMDYxYTMuMTIgMy4xMiAwIDAwMi42NDIgMS40NzggMy4xNjUgMy4xNjUgMCAwMDIuNjYzLTEuNDc4bDUuNjE0LTkuMDYxYy44ODQtLjA3OCAxLjc2NS0uMTYzIDIuNjQzLS4yNjRsNy4yNjUgNy44MDJhMy4xMDYgMy4xMDYgMCAwMDIuODkuOTMzIDMuMTA1IDMuMTA1IDAgMDAyLjMxMi0xLjk2N2wzLjcxNi05Ljk2OWMuODYzLS4yNDggMS43MTktLjUxMiAyLjU4LS43ODNsOC42MjkgNi4yMTNhMy4xMiAzLjEyIDAgMDA0LjktMi4wNDVsMS43MTMtMTAuNTA2Yy43OTMtLjQxMSAxLjU3Ny0uODM4IDIuMzUzLTEuMjY1bDkuNjgxIDQuNDE2YTMuMTMgMy4xMyAwIDAwMy4wMzUtLjI0MSAzLjEyNiAzLjEyNiAwIDAwMS4zODUtMi43MDRsLS4zNzItMTAuNjcxYTgxLjc5NCA4MS43OTQgMCAwMDIuMDQ2LTEuNjhsMTAuMzgzIDIuNDM2YTMuMTIzIDMuMTIzIDAgMDAzLjc2My0zLjc0bC0yLjQzNi0xMC4zODJhODQuNTg4IDg0LjU4OCAwIDAwMS42OC0yLjA0OGwxMC42NzIuMzc0YTMuMTA0IDMuMTA0IDAgMDAyLjcwNC0xLjM4NSAzLjExOCAzLjExOCAwIDAwLjI0NC0zLjAzNWwtNC40MTctOS42OGMuNDMtLjc3OS44NTItMS41NjMgMS4yNjMtMi4zNTNsMTAuNTA3LTEuNzA5YTMuMDggMy4wOCAwIDAwMi4zNzMtMS44ODYgMy4xMSAzLjExIDAgMDAtLjM1LTMuMDE0bC02LjIxNC04LjYyN2MuMjcyLS44NTcuNTMyLTEuNzE3Ljc4MS0yLjU4bDkuOTctMy43MTZhMy4xMDkgMy4xMDkgMCAwMDEuOTY3LTIuMzExIDMuMTA3IDMuMTA3IDAgMDAtLjkzMy0yLjg5bC03LjgwMy03LjI2NWMuMDk2LS44OC4xODItMS43NjEuMjU4LTIuNjQybDkuMDYyLTUuNjE0YTMuMTEgMy4xMSAwIDAwMS40NzgtMi42NDIgMy4xNTcgMy4xNTcgMCAwMC0xLjQ3Ni0yLjY2M2gtLjA2NHptLTYwLjY4NyA3NS4zMzdjLTMuNDY4LS43NDctNS42NTYtNC4xNjktNC45MTMtNy42MzdhNi40MTIgNi40MTIgMCAwMTcuNjE3LTQuOTMzYzMuNDY4Ljc0MSA1LjY3NiA0LjE2OSA0LjkzMyA3LjYzN2E2LjQxNCA2LjQxNCAwIDAxLTcuNjE3IDQuOTMzaC0uMDJ6bS0zLjA3Ni0yMC44NDdjLTMuMTU4LS42NzctNi4yNzUgMS4zMzQtNi45MzYgNC41bC0zLjIyIDE1LjAyNmMtOS45MjkgNC41LTIxLjA1NSA3LjAxOC0zMi42MTQgNy4wMTgtMTEuODkgMC0yMy4xMi0yLjYyMi0zMy4yMzQtNy4zMjhsLTMuMjItMTUuMDI2Yy0uNjc3LTMuMTU4LTMuNzc4LTUuMTgtNi45MzYtNC40OTlsLTEzLjI3MyAyLjg0OGE4MC4yMjIgODAuMjIyIDAgMDEtNi44NTMtOC4wOTFoNjQuNjFjLjczMSAwIDEuMjE4LS4xMzIgMS4yMTgtLjc5N3YtMjIuOTFjMC0uNjY1LS40ODctLjc5Ny0xLjIxOC0uNzk3SDk0LjEzM3YtMTQuNDY5aDIwLjQxNWMxLjg2NCAwIDkuOTcuNTMzIDEyLjU1MSAxMC44OTguODExIDMuMTc5IDIuNjAxIDEzLjU0IDMuODE4IDE2Ljg2MyAxLjIxNCAzLjcxNSA2LjE1MiAxMS4xNDYgMTEuNDE1IDExLjE0NmgzMi4yMDJjLjM2NSAwIC43NTUtLjA0MSAxLjE2Ni0uMTE2YTgwLjU2IDgwLjU2IDAgMDEtNy4zMDcgOC41ODdsLTEzLjU4My0yLjkxMS0uMTEzLjA1OHptLTg5LjM4IDIwLjUzN2E2LjQwNyA2LjQwNyAwIDAxLTcuNjE3LTQuOTMzYy0uNzQtMy40NjcgMS40NjItNi44OTQgNC45MzQtNy42MzdhNi40MTcgNi40MTcgMCAwMTcuNjE3IDQuOTMzYy43NCAzLjQ2OC0xLjQ2NCA2Ljg5NC00LjkzNCA3LjYzN3ptLTI0LjU2NC05OS4yOGE2LjQzOCA2LjQzOCAwIDAxLTMuMjYxIDguNDg0Yy0zLjI0MSAxLjQzOC03LjAxOS0uMDI1LTguNDY0LTMuMjYxLTEuNDQ1LTMuMjM3LjAyNS03LjAzOSAzLjI2Mi04LjQ4M2E2LjQxNiA2LjQxNiAwIDAxOC40NjMgMy4yNnpNMzMuMjIgMTAyLjk0bDEzLjgzLTYuMTVjMi45NTItMS4zMTEgNC4yOTQtNC43NjkgMi45NzItNy43MmwtMi44NDgtNi40NEg1OC4zNnY1MC4zNjJoLTIyLjVhNzkuMTU4IDc5LjE1OCAwIDAxLTMuMDE0LTIxLjY3MmMwLTIuODY5LjE1NS01LjY5Ny40NTItOC40ODNsLS4wOC4xMDN6bTYwLjY4Ny00Ljg5MnYtMTQuODZoMjYuNjI5YzEuMzc2IDAgOS43MjIgMS41OSA5LjcyMiA3LjgyMiAwIDUuMTgtNi4zOTkgNy4wMzgtMTEuNjYzIDcuMDM4aC0yNC43Ny4wODJ6bTk2LjgxMSAxMy4zNzVjMCAxLjk3My0uMDcyIDMuOTIyLS4yMTYgNS44NjJoLTguMTEzYy0uODExIDAtMS4xMzcuNTMyLTEuMTM3IDEuMzI3djMuNzE1YzAgOC43NTItNC45MzQgMTAuNjcxLTkuMjY4IDExLjE0Ni00LjEyOS40NjQtOC42OTEtMS43MjYtOS4yNDgtNC4yNTItMi40MzYtMTMuNjg0LTYuNDgyLTE2LjU5NS0xMi44ODEtMjEuNjcyIDcuOTQ4LTUuMDM2IDE2LjIwNC0xMi40ODcgMTYuMjA0LTIyLjQ5OCAwLTEwLjc1My03LjM2OS0xNy41MjMtMTIuMzg1LTIwLjg0Ny03LjA1OS00LjY0NC0xNC44NjItNS41NzItMTYuOTY4LTUuNTcySDUyLjg5OWMxMS4zNzQtMTIuNjczIDI2LjgzNS0yMS42NzMgNDQuMTc0LTI0Ljk3NWw5Ljg4NyAxMC4zNjFhNS44NDkgNS44NDkgMCAwMDguMjc4LjE5bDExLjA2NC0xMC41NjhjMjMuMTE5IDQuMzE0IDQyLjcyOSAxOC43MjEgNTQuMDgyIDM4LjU5OGwtNy41NzYgMTcuMDljLTEuMzA2IDIuOTUxLjAyNyA2LjQxOSAyLjk3MyA3LjcybDE0LjU3MyA2LjQ4Yy4yNTUgMi42MDcuMzgzIDUuMjI0LjM4NCA3Ljg0M2wtLjAyMS4wNTJ6TTEwNi45MTIgMjQuOTRhNi4zOTggNi4zOTggMCAwMTkuMDYyLjIwOSA2LjQzNyA2LjQzNyAwIDAxLS4yMTMgOS4wODIgNi4zOTYgNi4zOTYgMCAwMS05LjA2Mi0uMjEgNi40MzYgNi40MzYgMCAwMS4yMTMtOS4wODN2LjAwMnptNzUuMTM3IDYwLjQ3NmE2LjQwMiA2LjQwMiAwIDAxOC40NjMtMy4yNiA2LjQyNSA2LjQyNSAwIDAxMy4yNjEgOC40ODIgNi40MDIgNi40MDIgMCAwMS04LjQ2MyAzLjI2MSA2LjQyNSA2LjQyNSAwIDAxLTMuMjYxLTguNDgzeiIvPjwvc3ZnPg==" width="224" height="224"/></symbol>
+  <symbol id="lg-node" viewBox="0 0 256 292"><image href="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjU2IDI5MiIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4bWxuczp4bGluaz0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94bGluayIgd2lkdGg9IjI1NiIgaGVpZ2h0PSIyOTIiPjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iYSIgeDE9IjY4LjE4OCUiIHgyPSIyNy44MjMlIiB5MT0iMTcuNDg3JSIgeTI9Ijg5Ljc1NSUiPjxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiM0MTg3M0YiLz48c3RvcCBvZmZzZXQ9IjMyLjg4JSIgc3RvcC1jb2xvcj0iIzQxOEIzRCIvPjxzdG9wIG9mZnNldD0iNjMuNTIlIiBzdG9wLWNvbG9yPSIjNDE5NjM3Ii8+PHN0b3Agb2Zmc2V0PSI5My4xOSUiIHN0b3AtY29sb3I9IiMzRkE5MkQiLz48c3RvcCBvZmZzZXQ9IjEwMCUiIHN0b3AtY29sb3I9IiMzRkFFMkEiLz48L2xpbmVhckdyYWRpZW50PjxsaW5lYXJHcmFkaWVudCBpZD0iYyIgeDE9IjQzLjI3NyUiIHgyPSIxNTkuMjQ1JSIgeTE9IjU1LjE2OSUiIHkyPSItMTguMzA2JSI+PHN0b3Agb2Zmc2V0PSIxMy43NiUiIHN0b3AtY29sb3I9IiM0MTg3M0YiLz48c3RvcCBvZmZzZXQ9IjQwLjMyJSIgc3RvcC1jb2xvcj0iIzU0QTA0NCIvPjxzdG9wIG9mZnNldD0iNzEuMzYlIiBzdG9wLWNvbG9yPSIjNjZCODQ4Ii8+PHN0b3Agb2Zmc2V0PSI5MC44MSUiIHN0b3AtY29sb3I9IiM2Q0MwNEEiLz48L2xpbmVhckdyYWRpZW50PjxsaW5lYXJHcmFkaWVudCBpZD0iZiIgeDE9Ii00LjM4OSUiIHgyPSIxMDEuNDk5JSIgeTE9IjQ5Ljk5NyUiIHkyPSI0OS45OTclIj48c3RvcCBvZmZzZXQ9IjkuMTkyJSIgc3RvcC1jb2xvcj0iIzZDQzA0QSIvPjxzdG9wIG9mZnNldD0iMjguNjQlIiBzdG9wLWNvbG9yPSIjNjZCODQ4Ii8+PHN0b3Agb2Zmc2V0PSI1OS42OCUiIHN0b3AtY29sb3I9IiM1NEEwNDQiLz48c3RvcCBvZmZzZXQ9Ijg2LjI0JSIgc3RvcC1jb2xvcj0iIzQxODczRiIvPjwvbGluZWFyR3JhZGllbnQ+PHBhdGggaWQ9ImIiIGQ9Ik0xMzQuOTIzIDEuODMyYy00LjM0NC0yLjQ0My05LjUwMi0yLjQ0My0xMy44NDYgMEw2Ljc4NyA2Ny44MDFDMi40NDMgNzAuMjQ0IDAgNzQuODU5IDAgNzkuNzQ1djEzMi4yMDhjMCA0Ljg4NyAyLjcxNSA5LjUwMiA2Ljc4NyAxMS45NDVsMTE0LjI5IDY1Ljk2OGM0LjM0NCAyLjQ0NCA5LjUwMiAyLjQ0NCAxMy44NDYgMGwxMTQuMjktNjUuOTY4YzQuMzQ0LTIuNDQzIDYuNzg3LTcuMDU4IDYuNzg3LTExLjk0NVY3OS43NDVjMC00Ljg4Ni0yLjcxNS05LjUwMS02Ljc4Ny0xMS45NDRMMTM0LjkyMyAxLjgzMloiLz48cGF0aCBpZD0iZSIgZD0iTTEzNC45MjMgMS44MzJjLTQuMzQ0LTIuNDQzLTkuNTAyLTIuNDQzLTEzLjg0NiAwTDYuNzg3IDY3LjgwMUMyLjQ0MyA3MC4yNDQgMCA3NC44NTkgMCA3OS43NDV2MTMyLjIwOGMwIDQuODg3IDIuNzE1IDkuNTAyIDYuNzg3IDExLjk0NWwxMTQuMjkgNjUuOTY4YzQuMzQ0IDIuNDQ0IDkuNTAyIDIuNDQ0IDEzLjg0NiAwbDExNC4yOS02NS45NjhjNC4zNDQtMi40NDMgNi43ODctNy4wNTggNi43ODctMTEuOTQ1Vjc5Ljc0NWMwLTQuODg2LTIuNzE1LTkuNTAxLTYuNzg3LTExLjk0NEwxMzQuOTIzIDEuODMyWiIvPjwvZGVmcz48cGF0aCBmaWxsPSJ1cmwoI2EpIiBkPSJNMTM0LjkyMyAxLjgzMmMtNC4zNDQtMi40NDMtOS41MDItMi40NDMtMTMuODQ2IDBMNi43ODcgNjcuODAxQzIuNDQzIDcwLjI0NCAwIDc0Ljg1OSAwIDc5Ljc0NXYxMzIuMjA4YzAgNC44ODcgMi43MTUgOS41MDIgNi43ODcgMTEuOTQ1bDExNC4yOSA2NS45NjhjNC4zNDQgMi40NDQgOS41MDIgMi40NDQgMTMuODQ2IDBsMTE0LjI5LTY1Ljk2OGM0LjM0NC0yLjQ0MyA2Ljc4Ny03LjA1OCA2Ljc4Ny0xMS45NDVWNzkuNzQ1YzAtNC44ODYtMi43MTUtOS41MDEtNi43ODctMTEuOTQ0TDEzNC45MjMgMS44MzJaIi8+PG1hc2sgaWQ9ImQiIGZpbGw9IiNmZmYiPjx1c2UgeGxpbms6aHJlZj0iI2IiLz48L21hc2s+PHBhdGggZmlsbD0idXJsKCNjKSIgZD0iTTI0OS40ODUgNjcuOCAxMzQuNjUgMS44MzNjLTEuMDg2LS41NDItMi40NDMtMS4wODUtMy41MjktMS4zNTdMMi40NDMgMjIwLjkxMmMxLjA4NiAxLjM1NyAyLjQ0NCAyLjQ0MyAzLjggMy4yNThsMTE0LjgzNCA2NS45NjhjMy4yNTggMS45IDcuMDU5IDIuNDQzIDEwLjU4OCAxLjM1N0wyNTIuNDcgNzAuNTE1Yy0uODE1LTEuMDg2LTEuOS0xLjktMi45ODYtMi43MTRaIiBtYXNrPSJ1cmwoI2QpIi8+PG1hc2sgaWQ9ImciIGZpbGw9IiNmZmYiPjx1c2UgeGxpbms6aHJlZj0iI2UiLz48L21hc2s+PHBhdGggZmlsbD0idXJsKCNmKSIgZD0iTTI0OS43NTYgMjIzLjg5OGMzLjI1OC0xLjkgNS43MDEtNS4xNTggNi43ODctOC42ODdMMTMwLjU3OS4yMDRjLTMuMjU4LS41NDMtNi43ODctLjI3Mi05Ljc3MyAxLjYyOEw2Ljc4NiA2Ny41M2wxMjIuOTc5IDIyNC4yMzhjMS42MjgtLjI3MiAzLjUyOS0uODE1IDUuMTU4LTEuNjNsMTE0LjgzMy02Ni4yMzlaIiBtYXNrPSJ1cmwoI2cpIi8+PC9zdmc+Cg==" width="256" height="292"/></symbol>
+  <symbol id="lg-next" viewBox="0 0 180 180"><image href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxODAgMTgwIj48bWFzayBoZWlnaHQ9IjE4MCIgaWQ9IjpyODptYXNrMF80MDhfMTM0IiBtYXNrVW5pdHM9InVzZXJTcGFjZU9uVXNlIiB3aWR0aD0iMTgwIiB4PSIwIiB5PSIwIiBzdHlsZT0ibWFzay10eXBlOiBhbHBoYTsiPjxjaXJjbGUgY3g9IjkwIiBjeT0iOTAiIGZpbGw9ImJsYWNrIiByPSI5MCI+PC9jaXJjbGU+PC9tYXNrPjxnIG1hc2s9InVybCgjOnI4Om1hc2swXzQwOF8xMzQpIj48Y2lyY2xlIGN4PSI5MCIgY3k9IjkwIiBkYXRhLWNpcmNsZT0idHJ1ZSIgZmlsbD0iYmxhY2siIHI9IjkwIj48L2NpcmNsZT48cGF0aCBkPSJNMTQ5LjUwOCAxNTcuNTJMNjkuMTQyIDU0SDU0VjEyNS45N0g2Ni4xMTM2VjY5LjM4MzZMMTM5Ljk5OSAxNjQuODQ1QzE0My4zMzMgMTYyLjYxNCAxNDYuNTA5IDE2MC4xNjUgMTQ5LjUwOCAxNTcuNTJaIiBmaWxsPSJ1cmwoIzpyODpwYWludDBfbGluZWFyXzQwOF8xMzQpIj48L3BhdGg+PHJlY3QgZmlsbD0idXJsKCM6cjg6cGFpbnQxX2xpbmVhcl80MDhfMTM0KSIgaGVpZ2h0PSI3MiIgd2lkdGg9IjEyIiB4PSIxMTUiIHk9IjU0Ij48L3JlY3Q+PC9nPjxkZWZzPjxsaW5lYXJHcmFkaWVudCBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgaWQ9IjpyODpwYWludDBfbGluZWFyXzQwOF8xMzQiIHgxPSIxMDkiIHgyPSIxNDQuNSIgeTE9IjExNi41IiB5Mj0iMTYwLjUiPjxzdG9wIHN0b3AtY29sb3I9IndoaXRlIj48L3N0b3A+PHN0b3Agb2Zmc2V0PSIxIiBzdG9wLWNvbG9yPSJ3aGl0ZSIgc3RvcC1vcGFjaXR5PSIwIj48L3N0b3A+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiIGlkPSI6cjg6cGFpbnQxX2xpbmVhcl80MDhfMTM0IiB4MT0iMTIxIiB4Mj0iMTIwLjc5OSIgeTE9IjU0IiB5Mj0iMTA2Ljg3NSI+PHN0b3Agc3RvcC1jb2xvcj0id2hpdGUiPjwvc3RvcD48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IndoaXRlIiBzdG9wLW9wYWNpdHk9IjAiPjwvc3RvcD48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48L3N2Zz4=" width="180" height="180"/></symbol>
+</svg>
+<main>
+  <header class="only-sa"><h1>Rust for a Node full-stack developer, through Rlex</h1></header>
+  <p class="lede">Every Rust tool, file and module in Rlex, matched to the thing it replaces in a Node + Next.js project. Rust parts are marked orange, Node parts green.</p>
+
+  <!-- 1. Anatomy -->
+  <h2><span class="n">1</span> The toolchain, side by side</h2>
+  <div class="dg-wrap">
+  <svg class="dg" viewBox="0 0 760 312" role="img" aria-label="Rust toolchain row above the matching Node toolchain row">
+    <use href="#lg-rust" x="2" y="3" width="18" height="18"/><text class="b" x="26" y="17">Rust · how Rlex is built</text>
+
+    <rect class="ra" x="2" y="28" width="126" height="80" rx="12"/>
+    <circle cx="18" cy="44" r="9" fill="#7B5CFF"/><text class="bn" x="18" y="48">1</text><text class="b" x="32" y="49">rustup</text>
+    <text class="m" x="14" y="73">rustup update</text><text class="sm mut" x="14" y="93">picks the Rust version</text>
+
+    <rect class="ra" x="158" y="28" width="126" height="80" rx="12"/>
+    <circle cx="174" cy="44" r="9" fill="#0F9F8F"/><text class="bn" x="174" y="48">2</text><text class="b" x="188" y="49">cargo</text>
+    <text class="m" x="170" y="73">cargo run</text><text class="sm mut" x="170" y="93">builds, runs, tests</text>
+
+    <rect class="ra" x="314" y="28" width="126" height="80" rx="12"/>
+    <circle cx="330" cy="44" r="9" fill="#E5487A"/><text class="bn" x="330" y="48">3</text><text class="b" x="344" y="49">Cargo.toml</text>
+    <text class="m" x="326" y="73">+ Cargo.lock</text><text class="sm mut" x="326" y="93">deps, build profiles</text>
+
+    <rect class="ra" x="470" y="28" width="126" height="80" rx="12"/>
+    <circle cx="486" cy="44" r="9" fill="#C99A06"/><text class="bn" x="486" y="48">4</text><text class="b" x="500" y="49">crates.io</text>
+    <text class="m" x="482" y="73">gpui-kit, tokio</text><text class="sm mut" x="482" y="93">package registry</text>
+
+    <rect class="ra" x="626" y="28" width="126" height="80" rx="12"/>
+    <circle cx="642" cy="44" r="9" fill="#64748B"/><text class="bn" x="642" y="48">5</text><text class="b" x="656" y="49">rlex binary</text>
+    <text class="m" x="638" y="73">target/release</text><text class="sm mut" x="638" y="93">native, runs on its own</text>
+
+    <line class="ln" x1="130" y1="68" x2="156" y2="68" marker-end="url(#ah)"/>
+    <line class="ln" x1="286" y1="68" x2="312" y2="68" marker-end="url(#ah)"/>
+    <line class="ln" x1="442" y1="68" x2="468" y2="68" marker-end="url(#ah)"/>
+    <line class="ln" x1="598" y1="68" x2="624" y2="68" marker-end="url(#ah)"/>
+
+    <g>
+      <line class="ln dash" x1="65" y1="110" x2="65" y2="194"/><line class="ln dash" x1="221" y1="110" x2="221" y2="194"/>
+      <line class="ln dash" x1="377" y1="110" x2="377" y2="194"/><line class="ln dash" x1="533" y1="110" x2="533" y2="194"/>
+      <line class="ln dash" x1="689" y1="110" x2="689" y2="194"/>
+      <rect class="tb" x="45" y="141" width="40" height="22" rx="11"/><text class="mid mut b" x="65" y="157">≈</text>
+      <rect class="tb" x="201" y="141" width="40" height="22" rx="11"/><text class="mid mut b" x="221" y="157">≈</text>
+      <rect class="tb" x="357" y="141" width="40" height="22" rx="11"/><text class="mid mut b" x="377" y="157">≈</text>
+      <rect class="tb" x="513" y="141" width="40" height="22" rx="11"/><text class="mid mut b" x="533" y="157">≈</text>
+      <rect class="tb" x="669" y="141" width="40" height="22" rx="11"/><text class="mid mut b" x="689" y="157">≈</text>
+    </g>
+
+    <rect class="na" x="2" y="196" width="126" height="80" rx="12"/>
+    <circle cx="18" cy="212" r="9" fill="#7B5CFF"/><text class="bn" x="18" y="216">1</text><text class="b" x="32" y="217">nvm / mise</text>
+    <text class="m" x="14" y="241">nvm use 22</text><text class="sm mut" x="14" y="261">picks the Node version</text>
+
+    <rect class="na" x="158" y="196" width="126" height="80" rx="12"/>
+    <circle cx="174" cy="212" r="9" fill="#0F9F8F"/><text class="bn" x="174" y="216">2</text><text class="b" x="188" y="217">npm / pnpm</text>
+    <text class="m" x="170" y="241">npm run dev</text><text class="sm mut" x="170" y="261">+ next, vitest, eslint…</text>
+
+    <rect class="na" x="314" y="196" width="126" height="80" rx="12"/>
+    <circle cx="330" cy="212" r="9" fill="#E5487A"/><text class="bn" x="330" y="216">3</text><text class="b" x="344" y="217">package.json</text>
+    <text class="m" x="326" y="241">+ lock file</text><text class="sm mut" x="326" y="261">deps, scripts</text>
+
+    <rect class="na" x="470" y="196" width="126" height="80" rx="12"/>
+    <circle cx="486" cy="212" r="9" fill="#C99A06"/><text class="bn" x="486" y="216">4</text><text class="b" x="500" y="217">npmjs.com</text>
+    <text class="m" x="482" y="241">react, next</text><text class="sm mut" x="482" y="261">package registry</text>
+
+    <rect class="na" x="626" y="196" width="126" height="80" rx="12"/>
+    <circle cx="642" cy="212" r="9" fill="#64748B"/><text class="bn" x="642" y="216">5</text><text class="b" x="656" y="217">.next/ build</text>
+    <text class="m" x="638" y="241">node_modules</text><text class="sm mut" x="638" y="261">needs Node to run</text>
+
+    <line class="ln" x1="130" y1="236" x2="156" y2="236" marker-end="url(#ah)"/>
+    <line class="ln" x1="286" y1="236" x2="312" y2="236" marker-end="url(#ah)"/>
+    <line class="ln" x1="442" y1="236" x2="468" y2="236" marker-end="url(#ah)"/>
+    <line class="ln" x1="598" y1="236" x2="624" y2="236" marker-end="url(#ah)"/>
+
+    <use href="#lg-node" x="3" y="286" width="16" height="18"/><text class="b" x="26" y="300">Node full-stack · a Next.js app</text>
+  </svg>
+  </div>
+  <div class="parts">
+    <div class="part"><span class="badge k1">1</span><div><b>Version manager</b>Installs and switches compilers. You already use mise for Node.</div></div>
+    <div class="part"><span class="badge k2">2</span><div><b>One tool vs many</b>cargo builds, runs, tests, lints and formats. Node spreads that over npm, next, vitest, eslint and prettier.</div></div>
+    <div class="part"><span class="badge k3">3</span><div><b>Manifest + lock</b>Same idea: what you asked for, and the exact versions you got.</div></div>
+    <div class="part"><span class="badge k4">4</span><div><b>Registry</b>crates.io is npm's registry for Rust. cargo downloads from it during the build.</div></div>
+    <div class="part"><span class="badge k5">5</span><div><b>Output</b>Rust produces one native executable. Node ships JS that needs the <code>node</code> runtime.</div></div>
+  </div>
+  <p class="src">Sources: <a href="https://rust-lang.github.io/rustup/">rustup book</a> · <a href="https://doc.rust-lang.org/cargo/">The Cargo Book</a> · Rlex <a href="/home/jagrat/dev/Rlex-TV/Cargo.toml">Cargo.toml</a></p>
+
+  <!-- 2. Commands -->
+  <h2><span class="n">2</span> Command translation</h2>
+  <div class="tbl-wrap">
+  <table>
+    <thead><tr><th>You want to…</th><th><span><svg class="lg big"><use href="#lg-rust"/></svg>Rust (Rlex)</span></th><th><span><svg class="lg big"><use href="#lg-node"/></svg>Node / Next.js</span></th></tr></thead>
+    <tbody>
+      <tr><td>Install deps</td><td class="a"><span class="c">Automatic on the first <code>cargo build</code></span></td><td class="b"><code>npm install</code></td></tr>
+      <tr><td>Add a dep</td><td class="a"><code>cargo add regex</code></td><td class="b"><code>npm install lodash</code></td></tr>
+      <tr><td>Run in dev</td><td class="a"><code>cargo run</code><span class="c">compiles a debug binary, then starts it</span></td><td class="b"><code>next dev</code></td></tr>
+      <tr><td>Dev with reload</td><td class="a"><code>watchexec -r -e rs -- cargo run</code><br><code>bacon run-long</code><span class="c">rebuild + restart, no hot swap</span></td><td class="b"><span class="c">built into <code>next dev</code> (Fast Refresh); <code>nodemon</code> for plain servers</span></td></tr>
+      <tr><td>Production build</td><td class="a"><code>cargo build --release</code></td><td class="b"><code>next build</code></td></tr>
+      <tr><td>Run production</td><td class="a"><code>./target/release/rlex</code></td><td class="b"><code>next start</code></td></tr>
+      <tr><td>Both at once</td><td class="a"><code>cargo run --release</code></td><td class="b"><code>next build &amp;&amp; next start</code></td></tr>
+      <tr><td>Type check</td><td class="a"><code>cargo check</code></td><td class="b"><code>tsc --noEmit</code></td></tr>
+      <tr><td>Lint</td><td class="a"><code>cargo clippy</code></td><td class="b"><code>eslint .</code></td></tr>
+      <tr><td>Format</td><td class="a"><code>cargo fmt</code></td><td class="b"><code>prettier --write .</code></td></tr>
+      <tr><td>Test</td><td class="a"><code>cargo test</code></td><td class="b"><code>vitest</code> / <code>jest</code></td></tr>
+      <tr><td>Strict lock install</td><td class="a"><code>cargo build --locked</code></td><td class="b"><code>npm ci</code></td></tr>
+      <tr><td>Global CLI tool</td><td class="a"><code>cargo install --locked bacon</code></td><td class="b"><code>npm i -g nodemon</code></td></tr>
+      <tr><td>Custom scripts</td><td class="a"><span class="c">No <code>scripts</code>; use <code>[alias]</code> in <code>.cargo/config.toml</code></span></td><td class="b"><code>"scripts"</code> in package.json</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="src">Sources: <a href="https://doc.rust-lang.org/cargo/commands/cargo-install.html">cargo install (--locked)</a> · <a href="https://docs.npmjs.com/cli/v10/commands/npm-ci">npm ci</a> · <a href="https://doc.rust-lang.org/cargo/reference/config.html">Cargo config: [alias]</a> · <a href="https://nextjs.org/docs/app/api-reference/cli/next">next CLI</a></p>
+
+  <!-- 3. Dev loop -->
+  <h2><span class="n">3</span> What happens when you save a file</h2>
+  <div class="card lane b">
+    <div class="lane-h"><svg class="lg big"><use href="#lg-next"/></svg>next dev<span class="tag">hot swap · state kept</span></div>
+    <ol class="steps">
+      <li><b>Save</b><span>page.tsx</span></li>
+      <li><b>Dev server</b><span>recompiles that module</span></li>
+      <li><b>HMR push</b><span>sends it to the browser</span></li>
+      <li><b>Fast Refresh</b><span>swaps the component, keeps state</span></li>
+    </ol>
+  </div>
+  <div class="card lane a">
+    <div class="lane-h"><svg class="lg big"><use href="#lg-rust"/></svg>watchexec -r -e rs -- cargo run<span class="tag">restart · state reset</span></div>
+    <ol class="steps">
+      <li><b>Save</b><span>src/ui/home.rs</span></li>
+      <li><b>watchexec</b><span>sees it, kills the running app</span></li>
+      <li><b>cargo</b><span>recompiles only the rlex crate; deps cached in target/</span></li>
+      <li><b>Link</b><span>writes target/debug/rlex</span></li>
+      <li><b>Relaunch</b><span>window reopens on Home; your data on disk is kept</span></li>
+    </ol>
+  </div>
+  <div class="facts" style="margin-top:12px">
+    <span class="fact"><svg class="lg"><use href="#lg-rust"/></svg>No dev server: you always run a real compiled binary</span>
+    <span class="fact"><svg class="lg"><use href="#lg-rust"/></svg><code>bacon run-long</code> does the same kill-then-restart, with an error panel</span>
+    <span class="fact"><svg class="lg"><use href="#lg-rust"/></svg>watchexec 2.8.0 is installed via mise</span>
+  </div>
+  <p class="src">Sources: <a href="https://github.com/watchexec/watchexec">watchexec</a> · <a href="https://dystroy.org/bacon/config/">bacon config</a> (<code>run-long</code> uses <code>on_change_strategy = "kill_then_restart"</code>) · <a href="https://nextjs.org/docs/architecture/fast-refresh">Next.js Fast Refresh</a></p>
+
+  <!-- 4. Debug vs release -->
+  <h2><span class="n">4</span> Debug vs release</h2>
+  <div class="grid2">
+    <div class="card" style="--c:var(--p2)">
+      <div class="mode-h"><b>Debug</b><code>cargo run</code></div>
+      <div class="meter">
+        <span>Compile time</span><span class="bar"><i style="width:35%"></i></span>
+        <span>App speed</span><span class="bar"><i style="width:70%"></i></span>
+        <span>Safety checks</span><span class="bar"><i style="width:100%"></i></span>
+      </div>
+      <p class="c" style="font-size:13px;margin:8px 0 0">≈ <code>next dev</code>. Default <code>opt-level = 0</code>, but Rlex builds GPUI, taffy, resvg and image at 3, so the UI stays smooth. Overflow checks and <code>debug_assert!</code> are on.</p>
+    </div>
+    <div class="card" style="--c:var(--p1)">
+      <div class="mode-h"><b>Release</b><code>cargo run --release</code></div>
+      <div class="meter">
+        <span>Compile time</span><span class="bar"><i style="width:90%"></i></span>
+        <span>App speed</span><span class="bar"><i style="width:100%"></i></span>
+        <span>Safety checks</span><span class="bar"><i style="width:30%"></i></span>
+      </div>
+      <p class="c" style="font-size:13px;margin:8px 0 0">≈ <code>next build</code>. <code>opt-level = 3</code> everywhere; overflow checks and debug assertions off. Rlex also strips symbols.</p>
+    </div>
+  </div>
+  <p class="c" style="font-size:12.5px">Bars are relative, not measured.</p>
+  <p class="src">Sources: <a href="https://doc.rust-lang.org/cargo/reference/profiles.html">Cargo profiles</a> · Rlex <a href="/home/jagrat/dev/Rlex-TV/Cargo.toml">Cargo.toml</a> <code>[profile.dev.package]</code></p>
+
+  <!-- 5. Manifest -->
+  <h2><span class="n">5</span> Cargo.toml ↔ package.json</h2>
+  <div class="grid2">
+    <div>
+      <div class="mf-h"><svg class="lg"><use href="#lg-rust"/></svg>Rlex's Cargo.toml (trimmed)</div>
+      <div class="mf">
+<div class="t1"><span class="g"><span class="badge k1">1</span></span>[package]</div>
+<div class="t1"><span class="g"></span>name = "rlex"</div>
+<div class="t1"><span class="g"></span>version = "0.1.0"</div>
+<div class="t2"><span class="g"><span class="badge k2">2</span></span>edition = "2024"</div>
+<div><span class="g"></span> </div>
+<div class="t3"><span class="g"><span class="badge k3">3</span></span>[dependencies]</div>
+<div class="t3"><span class="g"></span>gpui-kit = "=0.8.1"</div>
+<div class="t3"><span class="g"></span>regex = "1"</div>
+<div class="t4"><span class="g"><span class="badge k4">4</span></span>tokio = { version = "1",</div>
+<div class="t4"><span class="g"></span>  features = ["net", "process", …] }</div>
+<div><span class="g"></span> </div>
+<div class="t5"><span class="g"><span class="badge k5">5</span></span>[profile.release]</div>
+<div class="t5"><span class="g"></span>strip = "symbols"</div>
+      </div>
+    </div>
+    <div>
+      <div class="mf-h"><svg class="lg"><use href="#lg-node"/></svg>The package.json it would be</div>
+      <div class="mf">
+<div><span class="g"></span>{</div>
+<div class="t1"><span class="g"><span class="badge k1">1</span></span>  "name": "rlex",</div>
+<div class="t1"><span class="g"></span>  "version": "0.1.0",</div>
+<div class="t2"><span class="g"><span class="badge k2">2</span></span>  "type": "module",</div>
+<div class="t3"><span class="g"><span class="badge k3">3</span></span>  "dependencies": {</div>
+<div class="t3"><span class="g"></span>    "react": "19.0.0",</div>
+<div class="t3"><span class="g"></span>    "lodash": "^4"</div>
+<div class="t3"><span class="g"></span>  },</div>
+<div><span class="g"></span>  "scripts": {</div>
+<div><span class="g"></span>    "dev": "next dev",</div>
+<div><span class="g"></span>    "build": "next build"</div>
+<div><span class="g"></span>  }</div>
+<div><span class="g"></span>}</div>
+      </div>
+    </div>
+  </div>
+  <div class="notes">
+    <div class="part"><span class="badge k1">1</span><div><b>Identity</b>Same fields, TOML instead of JSON.</div></div>
+    <div class="part"><span class="badge k2">2</span><div><b>Edition</b>Which Rust language rules apply. The loose Node match is <code>"type": "module"</code>.</div></div>
+    <div class="part"><span class="badge k3">3</span><div><b>Versions</b><code>"1"</code> means <code>^1</code>, like npm's caret. <code>"=0.8.1"</code> pins exactly.</div></div>
+    <div class="part"><span class="badge k4">4</span><div><b>Features</b>Turn on optional parts of a crate at compile time. npm has no equivalent.</div></div>
+    <div class="part"><span class="badge k5">5</span><div><b>Profiles</b>Compiler settings per build mode. Closest match: build options in <code>next.config.js</code>.</div></div>
+    <div class="part"><span class="badge k5">·</span><div><b>No scripts</b>cargo's subcommands are fixed; add shortcuts with <code>[alias]</code>.</div></div>
+  </div>
+  <p class="src">Sources: <a href="https://doc.rust-lang.org/cargo/reference/manifest.html">Cargo manifest</a> · <a href="https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html">Specifying dependencies</a> · <a href="https://doc.rust-lang.org/cargo/reference/features.html">Features</a></p>
+
+  <!-- 6. Runtime -->
+  <h2><span class="n">6</span> Where the code runs</h2>
+  <div class="dg-wrap">
+  <svg class="dg" viewBox="0 0 760 310" role="img" aria-label="Rlex as one process with a UI thread and a Tokio pool, next to a browser plus Node server">
+    <use href="#lg-rust" x="2" y="3" width="18" height="18"/><text class="b" x="26" y="17">Rlex: one native process</text>
+    <rect x="0.5" y="26" width="364" height="204" rx="14" fill="none" stroke="var(--a)" stroke-dasharray="6 4"/>
+    <rect class="ra" x="14" y="40" width="336" height="62" rx="10"/>
+    <text class="b" x="28" y="62">GPUI main thread</text><text class="sm mut" x="28" y="80">draws the window, handles clicks</text><text class="m" x="28" y="95">src/ui/ · state.rs</text>
+    <rect class="ra" x="14" y="152" width="336" height="62" rx="10"/>
+    <text class="b" x="28" y="174">Tokio thread pool</text><text class="sm mut" x="28" y="192">HTTP, torrents, folder scans</text><text class="m" x="28" y="207">runtime.rs</text>
+    <line class="ln" x1="60" y1="104" x2="60" y2="150" marker-end="url(#ah)"/><text class="sm mut" x="68" y="131">runtime::run(job)</text>
+    <line class="ln" x1="220" y1="150" x2="220" y2="104" marker-end="url(#ah)"/><text class="sm mut" x="228" y="131">result → cx.notify()</text>
+
+    <rect class="dc" x="14" y="258" width="104" height="42" rx="8"/><text class="mid" x="66" y="276">mpv</text><text class="sm mut mid" x="66" y="291">child process</text>
+    <rect class="dc" x="130" y="258" width="104" height="42" rx="8"/><text class="mid" x="182" y="276">Cinemeta, addons</text><text class="sm mut mid" x="182" y="291">HTTPS</text>
+    <rect class="dc" x="246" y="258" width="104" height="42" rx="8"/><text class="mid" x="298" y="276">BitTorrent peers</text><text class="sm mut mid" x="298" y="291">librqbit</text>
+    <line class="ln" x1="66" y1="216" x2="66" y2="256" marker-end="url(#ah)"/>
+    <line class="ln" x1="182" y1="216" x2="182" y2="256" marker-end="url(#ah)"/>
+    <line class="ln" x1="298" y1="216" x2="298" y2="256" marker-end="url(#ah)"/>
+
+    <use href="#lg-node" x="397" y="2" width="16" height="18"/><text class="b" x="420" y="17">Node full-stack: two processes over HTTP</text>
+    <rect x="395.5" y="26" width="364" height="78" rx="14" fill="none" stroke="var(--b)" stroke-dasharray="6 4"/>
+    <rect class="na" x="409" y="40" width="336" height="54" rx="10"/>
+    <text class="b" x="423" y="61">Browser · React</text><text class="sm mut" x="423" y="80">renders the UI, keeps client state</text>
+    <rect x="395.5" y="142" width="364" height="88" rx="14" fill="none" stroke="var(--b)" stroke-dasharray="6 4"/>
+    <rect class="na" x="409" y="152" width="336" height="62" rx="10"/>
+    <text class="b" x="423" y="174">Node server · one event loop</text><text class="sm mut" x="423" y="192">API routes; libuv pool for disk and DNS</text><text class="m" x="423" y="207">app/api/ · server actions</text>
+    <line class="ln" x1="455" y1="106" x2="455" y2="140" marker-end="url(#ah)"/><text class="sm mut" x="463" y="127">fetch('/api/…')</text>
+    <line class="ln" x1="615" y1="140" x2="615" y2="106" marker-end="url(#ah)"/><text class="sm mut" x="623" y="127">JSON</text>
+
+    <rect class="dc" x="409" y="258" width="104" height="42" rx="8"/><text class="mid" x="461" y="276">Database</text><text class="sm mut mid" x="461" y="291">Postgres, SQLite</text>
+    <rect class="dc" x="525" y="258" width="104" height="42" rx="8"/><text class="mid" x="577" y="276">External APIs</text><text class="sm mut mid" x="577" y="291">fetch()</text>
+    <rect class="dc" x="641" y="258" width="104" height="42" rx="8"/><text class="mid" x="693" y="276">Other processes</text><text class="sm mut mid" x="693" y="291">child_process</text>
+    <line class="ln" x1="461" y1="216" x2="461" y2="256" marker-end="url(#ah)"/>
+    <line class="ln" x1="577" y1="216" x2="577" y2="256" marker-end="url(#ah)"/>
+    <line class="ln" x1="693" y1="216" x2="693" y2="256" marker-end="url(#ah)"/>
+  </svg>
+  </div>
+  <p>In Rlex the "frontend" and "backend" live in one process, so they talk through function calls instead of HTTP. Slow work is sent to Tokio with <code>runtime::run</code>, the UI thread awaits the result, and <code>cx.notify()</code> re-renders whatever views are watching. It's like a React state update. The one HTTP server in Rlex is the localhost torrent stream that mpv reads from.</p>
+  <p class="src">Sources: <a href="/home/jagrat/dev/Rlex-TV/src/runtime.rs">src/runtime.rs</a> · <a href="/home/jagrat/dev/Rlex-TV/src/state.rs">src/state.rs</a> · <a href="https://tokio.rs/tokio/tutorial">Tokio tutorial</a> · <a href="https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick">Node event loop</a></p>
+
+  <!-- 7. Module map -->
+  <h2><span class="n">7</span> Rlex's modules as a Node project</h2>
+  <div class="dg-wrap">
+  <svg class="dg" viewBox="0 0 760 488" role="img" aria-label="Each Rlex source file mapped to a Node full-stack file">
+    <use href="#lg-rust" x="2" y="4" width="18" height="18"/><text class="b" x="26" y="18">Rlex file</text>
+    <text class="b mid mut" x="380" y="18">layer</text>
+    <use href="#lg-node" x="431" y="3" width="16" height="18"/><text class="b" x="454" y="18">Node full-stack equivalent</text>
+
+    <g><rect class="ra" x="2" y="32" width="320" height="42" rx="9"/><text class="m b" x="16" y="50">src/ui/*.rs</text><text class="sm mut" x="16" y="66">GPUI views: shell, home, search, detail…</text><line class="ln" x1="324" y1="53" x2="343" y2="53"/><rect x="345" y="43" width="70" height="20" rx="10" fill="#7B5CFF"/><text class="wt" x="380" y="57">UI</text><line class="ln" x1="417" y1="53" x2="436" y2="53" marker-end="url(#ah)"/><rect class="na" x="438" y="32" width="320" height="42" rx="9"/><text class="m b" x="452" y="50">app/ + components/</text><text class="sm mut" x="452" y="66">React pages and components</text>
+<rect class="ra" x="2" y="82" width="320" height="42" rx="9"/><text class="m b" x="16" y="100">state.rs</text><text class="sm mut" x="16" y="116">one shared AppState entity; cx.notify()</text><line class="ln" x1="324" y1="103" x2="343" y2="103"/><rect x="345" y="93" width="70" height="20" rx="10" fill="#0F9F8F"/><text class="wt" x="380" y="107">State</text><line class="ln" x1="417" y1="103" x2="436" y2="103" marker-end="url(#ah)"/><rect class="na" x="438" y="82" width="320" height="42" rx="9"/><text class="m b" x="452" y="100">store + app/api/</text><text class="sm mut" x="452" y="116">Zustand / React Query + API routes</text>
+<rect class="ra" x="2" y="132" width="320" height="42" rx="9"/><text class="m b" x="16" y="150">addons.rs</text><text class="sm mut" x="16" y="166">Stremio addon protocol client + types</text><line class="ln" x1="324" y1="153" x2="343" y2="153"/><rect x="345" y="143" width="70" height="20" rx="10" fill="#E5487A"/><text class="wt" x="380" y="157">Service</text><line class="ln" x1="417" y1="153" x2="436" y2="153" marker-end="url(#ah)"/><rect class="na" x="438" y="132" width="320" height="42" rx="9"/><text class="m b" x="452" y="150">lib/stremio.ts</text><text class="sm mut" x="452" y="166">fetch() client + TypeScript types</text>
+<rect class="ra" x="2" y="182" width="320" height="42" rx="9"/><text class="m b" x="16" y="200">library.rs</text><text class="sm mut" x="16" y="216">scan folders, parse names, match titles</text><line class="ln" x1="324" y1="203" x2="343" y2="203"/><rect x="345" y="193" width="70" height="20" rx="10" fill="#E5487A"/><text class="wt" x="380" y="207">Service</text><line class="ln" x1="417" y1="203" x2="436" y2="203" marker-end="url(#ah)"/><rect class="na" x="438" y="182" width="320" height="42" rx="9"/><text class="m b" x="452" y="200">jobs/scan-library.ts</text><text class="sm mut" x="452" y="216">background job or worker thread</text>
+<rect class="ra" x="2" y="232" width="320" height="42" rx="9"/><text class="m b" x="16" y="250">torrent.rs</text><text class="sm mut" x="16" y="266">librqbit engine + localhost stream server</text><line class="ln" x1="324" y1="253" x2="343" y2="253"/><rect x="345" y="243" width="70" height="20" rx="10" fill="#E5487A"/><text class="wt" x="380" y="257">Service</text><line class="ln" x1="417" y1="253" x2="436" y2="253" marker-end="url(#ah)"/><rect class="na" x="438" y="232" width="320" height="42" rx="9"/><text class="m b" x="452" y="250">stream-server.ts</text><text class="sm mut" x="452" y="266">Express + WebTorrent, a separate server</text>
+<rect class="ra" x="2" y="282" width="320" height="42" rx="9"/><text class="m b" x="16" y="300">player.rs</text><text class="sm mut" x="16" y="316">launch mpv, follow progress (IPC/MPRIS)</text><line class="ln" x1="324" y1="303" x2="343" y2="303"/><rect x="345" y="293" width="70" height="20" rx="10" fill="#E5487A"/><text class="wt" x="380" y="307">Service</text><line class="ln" x1="417" y1="303" x2="436" y2="303" marker-end="url(#ah)"/><rect class="na" x="438" y="282" width="320" height="42" rx="9"/><text class="m b" x="452" y="300">lib/player.ts</text><text class="sm mut" x="452" y="316">child_process.spawn('mpv')</text>
+<rect class="ra" x="2" y="332" width="320" height="42" rx="9"/><text class="m b" x="16" y="350">watch.rs</text><text class="sm mut" x="16" y="366">watch history, resume points</text><line class="ln" x1="324" y1="353" x2="343" y2="353"/><rect x="345" y="343" width="70" height="20" rx="10" fill="#C99A06"/><text class="wt" x="380" y="357">Data</text><line class="ln" x1="417" y1="353" x2="436" y2="353" marker-end="url(#ah)"/><rect class="na" x="438" y="332" width="320" height="42" rx="9"/><text class="m b" x="452" y="350">models/history.ts</text><text class="sm mut" x="452" y="366">a DB table and its queries</text>
+<rect class="ra" x="2" y="382" width="320" height="42" rx="9"/><text class="m b" x="16" y="400">store.rs</text><text class="sm mut" x="16" y="416">data paths, atomic JSON files</text><line class="ln" x1="324" y1="403" x2="343" y2="403"/><rect x="345" y="393" width="70" height="20" rx="10" fill="#C99A06"/><text class="wt" x="380" y="407">Data</text><line class="ln" x1="417" y1="403" x2="436" y2="403" marker-end="url(#ah)"/><rect class="na" x="438" y="382" width="320" height="42" rx="9"/><text class="m b" x="452" y="400">lib/db.ts</text><text class="sm mut" x="452" y="416">SQLite / lowdb / fs.writeFile</text>
+<rect class="ra" x="2" y="432" width="320" height="42" rx="9"/><text class="m b" x="16" y="450">main.rs + runtime.rs</text><text class="sm mut" x="16" y="466">start logging + Tokio, open the window</text><line class="ln" x1="324" y1="453" x2="343" y2="453"/><rect x="345" y="443" width="70" height="20" rx="10" fill="#64748B"/><text class="wt" x="380" y="457">Boot</text><line class="ln" x1="417" y1="453" x2="436" y2="453" marker-end="url(#ah)"/><rect class="na" x="438" y="432" width="320" height="42" rx="9"/><text class="m b" x="452" y="450">server.ts / next start</text><text class="sm mut" x="452" y="466">boot the server</text></g>
+  </svg>
+  </div>
+  <p>The biggest difference is in the "State" row. <code>state.rs</code> plays the role of both the client store and the API layer. There's no network boundary between them, so there are no request or response types to keep in sync.</p>
+  <p class="src">Sources: module doc comments in <a href="/home/jagrat/dev/Rlex-TV/src/">src/</a> · <a href="/home/jagrat/dev/Rlex-TV/README.md">README.md</a> "Code" table</p>
+
+  <!-- 8. For Rlex -->
+  <h2><span class="n">8</span> Your day-to-day on Rlex</h2>
+  <div class="grid2">
+    <div class="card">
+      <h3><svg class="lg"><use href="#lg-rust"/></svg>While coding</h3>
+<pre><code>watchexec -r -e rs -- cargo run
+<span class="c"># or, with an error panel:</span>
+bacon run-long</code></pre>
+      <p class="c" style="font-size:13px;margin:0">Use debug builds: they rebuild faster, and the GPUI crates are already optimized.</p>
+    </div>
+    <div class="card">
+      <h3><svg class="lg"><use href="#lg-rust"/></svg>Before committing / for real use</h3>
+<pre><code>cargo fmt &amp;&amp; cargo clippy &amp;&amp; cargo test
+cargo build --release
+./target/release/rlex</code></pre>
+      <p class="c" style="font-size:13px;margin:0">≈ <code>prettier &amp;&amp; eslint &amp;&amp; vitest</code>, then <code>next build</code>.</p>
+    </div>
+  </div>
+
+  <footer>As of 2026-10-28. Rust 1.99.1, watchexec 2.8.0, Rlex at commit 90fdb3c.</footer>
+</main>
+<script>
+  if (!getComputedStyle(document.documentElement).getPropertyValue('--foreground').trim()) document.documentElement.classList.add('standalone');
+</script>
+</body>
+</html>

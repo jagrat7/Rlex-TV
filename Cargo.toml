@@ -11,6 +11,8 @@ dirs = "6"
 env_logger = "0.11"
 futures = "0.3"
 gpui-kit = "=0.8.1"
+# Decodes the window icon; the version GPUI's `WindowOptions::icon` expects.
+image = { version = "0.25", default-features = false, features = ["png"] }
 librqbit = { version = "9.0.1", default-features = false, features = ["http-api", "rust-tls", "tracing-subscriber-utils"] }
 # The listener type librqbit's streaming server takes. `http-api` only compiles
 # with `tracing-subscriber-utils` (librqbit 9.0.1).

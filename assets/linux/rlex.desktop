@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Rlex
+GenericName=Media Center
+Comment=Your folders, Stremio addons and torrent streaming
+Exec=rlex
+Icon=rlex
+Terminal=false
+Categories=AudioVideo;Video;Player;
+Keywords=media;movies;tv;torrent;stremio;plex;
+StartupWMClass=rlex

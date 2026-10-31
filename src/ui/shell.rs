@@ -7,7 +7,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarCollapsible, SidebarHeader, SidebarMenu, SidebarMenuItem,
 };
-use gpui_kit::component::{ActiveTheme, Icon, StyledExt, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, StyledExt, WindowExt, h_flex, v_flex};
 use gpui_kit::*;
 
 use super::detail::DetailView;
@@ -188,16 +188,10 @@ impl Shell {
             .header(
                 SidebarHeader::new()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
+                        img(super::logo())
                             .size_8()
                             .flex_shrink_0()
-                            .rounded(theme.radius)
-                            .bg(theme.sidebar_primary)
-                            .text_color(theme.sidebar_primary_foreground)
-                            .child(Icon::new(IconName::Clapperboard)),
+                            .object_fit(ObjectFit::Contain),
                     )
                     .child(
                         v_flex()

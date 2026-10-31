@@ -6398,6 +6398,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "gpui-pre-reqwest-client",
+ "image",
  "librqbit",
  "librqbit-dualstack-sockets",
  "log",
