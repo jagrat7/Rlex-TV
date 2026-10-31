@@ -355,6 +355,7 @@ impl DetailView {
 
     fn header(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let actions = self.hero_actions(cx);
+        let resume = self.resume_line(cx);
         let theme = cx.theme();
         let bg = theme.background;
         let meta = match &self.info {
@@ -514,6 +515,28 @@ impl DetailView {
                         .child(text),
                 )
             })
+            .when_some(resume, |this, (progress, text)| {
+                this.child(
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .child(
+                            div()
+                                .w(px(180.))
+                                .h(px(4.))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(white().alpha(0.25))
+                                .child(div().h_full().w(relative(progress)).bg(theme.primary)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.foreground.alpha(0.85))
+                                .child(text),
+                        ),
+                )
+            })
             .child(actions);
 
         div()
@@ -552,6 +575,32 @@ impl DetailView {
                     .children(poster_tile)
                     .child(text),
             )
+    }
+
+    /// How far into the movie, or the series' next-up episode, playback got:
+    /// the bar's fill and `S1 E3 · 29m left`.
+    fn resume_line(&self, cx: &App) -> Option<(f32, String)> {
+        let Info::Ready(meta) = &self.info else {
+            return None;
+        };
+        let state = self.state.read(cx);
+        let (video_id, episode) = if meta.kind == "series" {
+            let video = next_up(meta, &state.watch)?;
+            let short = short_episode(&video.label());
+            (video.id.clone(), Some(short).filter(|s| !s.is_empty()))
+        } else {
+            (self.play_item(None).video_id, None)
+        };
+        let entry = state.watch_entry(&video_id)?;
+        if entry.watched || entry.duration <= 0.0 || entry.position <= 0.0 {
+            return None;
+        }
+        let left = fmt_time_left(entry.position, entry.duration);
+        let text = match episode {
+            Some(episode) => format!("{episode}  ·  {left}"),
+            None => left,
+        };
+        Some((entry.progress(), text))
     }
 
     /// Play (the best source, resuming), then for a movie the watched toggle
