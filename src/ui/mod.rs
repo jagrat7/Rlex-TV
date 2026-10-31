@@ -11,6 +11,7 @@ mod downloads;
 mod home;
 mod library;
 mod poster;
+mod quickplay;
 mod ratings;
 mod search;
 mod settings;
