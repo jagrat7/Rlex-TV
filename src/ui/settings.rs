@@ -10,7 +10,7 @@ use gpui_kit::*;
 
 use super::common::{busy, card, eid, error_text, muted, page, page_title, pick_folders, section};
 use super::ratings::from_ratings;
-use crate::ratings::{KEY_URL, Ratings};
+use crate::ratings::{KEY_URL, Ratings, built_in_key};
 use crate::state::AppState;
 
 pub struct SettingsView {
@@ -122,22 +122,12 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Tries the key in the field, or the saved one, with one request.
+    /// Tries the key in the field, or the one in use, with one request.
     fn test_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.testing_key {
             return;
         }
-        let typed = self.key_input.read(cx).value().trim().to_string();
-        let key = if typed.is_empty() {
-            self.state
-                .read(cx)
-                .settings
-                .omdb_api_key
-                .clone()
-                .unwrap_or_default()
-        } else {
-            typed
-        };
+        let key = self.key_input.read(cx).value().trim().to_string();
         self.testing_key = true;
         self.key_test = None;
         cx.notify();
@@ -160,7 +150,7 @@ impl SettingsView {
         let (has_key, key_error) = {
             let state = self.state.read(cx);
             (
-                state.has_omdb_key(),
+                state.has_own_omdb_key(),
                 state.ratings_error().map(str::to_string),
             )
         };
@@ -188,7 +178,11 @@ impl SettingsView {
             v_flex()
                 .gap_3()
                 .child(muted(
-                    "IMDb ratings come with Cinemeta. Add a free OMDb key to also see Rotten Tomatoes and Metacritic.",
+                    if built_in_key().is_some() {
+                        "IMDb ratings come with Cinemeta, Rotten Tomatoes and Metacritic from Wikidata. OMDb fills the gaps (mostly TV shows) with a key built into Rlex. If it runs out, add your own free key."
+                    } else {
+                        "IMDb ratings come with Cinemeta, Rotten Tomatoes and Metacritic from Wikidata. Wikidata rarely has TV shows; add a free OMDb key to fill the gaps."
+                    },
                     cx,
                 ))
                 .child(

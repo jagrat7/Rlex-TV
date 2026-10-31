@@ -75,8 +75,8 @@ impl RatingBadges {
     }
 }
 
-/// Badges for OMDb scores, using Cinemeta's IMDb score when OMDb has none
-/// (or there is no OMDb key).
+/// Badges for fetched scores, using Cinemeta's IMDb score when OMDb gave
+/// none.
 pub fn from_ratings(r: Option<&Ratings>, fallback_imdb: Option<&str>) -> RatingBadges {
     let imdb = r
         .and_then(|r| r.imdb.clone())
