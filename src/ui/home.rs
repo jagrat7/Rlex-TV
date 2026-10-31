@@ -316,10 +316,13 @@ impl HomeView {
                                 .gap_3()
                                 .items_center()
                                 .flex_wrap()
-                                .child(RatingBadges::from_ratings(
-                                    ratings.as_ref(),
-                                    meta.imdb_rating.as_deref(),
-                                ))
+                                .children(
+                                    Some(RatingBadges::from_ratings(
+                                        ratings.as_ref(),
+                                        meta.imdb_rating.as_deref(),
+                                    ))
+                                    .filter(|badges| !badges.is_empty()),
+                                )
                                 .child(
                                     div()
                                         .text_sm()
