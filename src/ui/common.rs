@@ -4,10 +4,10 @@
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable, StyledExt, WindowExt, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::state::AppState;
@@ -36,9 +36,18 @@ pub fn eid(name: impl Into<String>) -> ElementId {
     ElementId::Name(SharedString::from(name.into()))
 }
 
-/// The page body: padded, vertically scrolling, with a scrollbar.
-pub fn page(id: &'static str) -> gpui_kit::component::scroll::Scrollable<Div> {
-    v_flex().gap_6().p_6().overflow_y_scrollbar().id(id)
+/// The top bar's height. It floats over the page, so pages start below it
+/// unless they open with full-bleed artwork.
+pub const TOP_BAR_HEIGHT: f32 = 60.;
+
+/// The page body, padded and clear of the top bar. The shell scrolls it.
+pub fn page(id: &'static str) -> Stateful<Div> {
+    v_flex()
+        .id(id)
+        .w_full()
+        .gap_6()
+        .p_6()
+        .pt(px(TOP_BAR_HEIGHT + 16.))
 }
 
 pub fn page_title(text: impl Into<SharedString>) -> Div {
@@ -126,6 +135,68 @@ pub fn skeleton_lines(count: usize, cx: &App) -> Div {
             line.w_full()
         }
     }))
+}
+
+/// The big buttons over hero artwork: white for the main action,
+/// translucent for the rest.
+pub fn hero_button(
+    id: impl Into<ElementId>,
+    icon: IconName,
+    label: impl Into<SharedString>,
+    primary: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let (bg, hover, fg) = if primary {
+        (white(), white().alpha(0.8), black())
+    } else {
+        (hsla(0., 0., 0.55, 0.45), hsla(0., 0., 0.55, 0.3), white())
+    };
+    h_flex()
+        .id(id.into())
+        .h(px(42.))
+        .px_6()
+        .gap_2()
+        .items_center()
+        .rounded(px(6.))
+        .bg(bg)
+        .text_color(fg)
+        .font_semibold()
+        .cursor_pointer()
+        .hover(move |this| this.bg(hover))
+        .child(Icon::new(icon).size_5().text_color(fg))
+        .child(label.into())
+        .on_click(on_click)
+}
+
+/// Says why a second Play did nothing: one player is still starting.
+pub fn still_starting(window: &mut Window, cx: &mut App) {
+    window.push_notification(
+        Notification::info("Still starting the last one. Torrents can take a few seconds."),
+        cx,
+    );
+}
+
+/// Waits for a player to start, then runs `done` on the view and reports a
+/// failure as a toast.
+pub fn await_player<V: 'static>(
+    task: Task<anyhow::Result<()>>,
+    window: &mut Window,
+    cx: &mut Context<V>,
+    done: impl FnOnce(&mut V) + 'static,
+) {
+    cx.spawn_in(window, async move |this, cx| {
+        let result = task.await;
+        this.update_in(cx, |this, window, cx| {
+            done(this);
+            if let Err(err) = result {
+                window
+                    .push_notification(Notification::error(format!("Couldn't play: {err:#}")), cx);
+            }
+            cx.notify();
+        })
+        .ok();
+    })
+    .detach();
 }
 
 /// Opens the system folder picker and adds every chosen folder to the library.

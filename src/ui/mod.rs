@@ -1,5 +1,5 @@
-//! The GPUI user interface: a sidebar shell with Home, Search, Library,
-//! Downloads and Settings pages, and a Detail page pushed on top of them.
+//! The GPUI user interface: a top-bar shell with Home, Library, Downloads,
+//! Search and Settings pages, and Detail pages pushed on top of them.
 //!
 //! Every page holds the shared [`AppState`] entity, observes it so it
 //! re-renders when the backend changes, and asks the shell to navigate by
@@ -118,4 +118,6 @@ impl DetailTarget {
 /// Pages emit this; the shell pushes the matching page.
 pub enum NavEvent {
     OpenDetail(DetailTarget),
+    /// Settings, to add a source when there's nothing to play from.
+    OpenSettings,
 }

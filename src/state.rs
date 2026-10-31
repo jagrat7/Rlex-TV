@@ -334,6 +334,23 @@ impl AppState {
         }))
     }
 
+    /// Cinemeta's popular titles of one kind in one genre, for "More like
+    /// this".
+    pub fn load_genre(
+        &self,
+        kind: &str,
+        genre: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<Vec<Meta>>> {
+        let client = self.client.clone();
+        let (kind, genre) = (kind.to_string(), genre.to_string());
+        cx.background_spawn(runtime::run(async move {
+            client
+                .catalog(CINEMETA_URL, &kind, "top", &[("genre", &genre)])
+                .await
+        }))
+    }
+
     /// Searches Cinemeta's movies and series, and any addon catalog that takes
     /// a search term. Rows that come back empty are left out.
     pub fn search(
