@@ -9,7 +9,10 @@ use gpui_kit::component::{ActiveTheme, StyledExt, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::common::{Load, TOP_BAR_HEIGHT, await_player, eid, error_text, hero_button, muted};
+use super::common::{
+    Load, TOP_BAR_HEIGHT, await_player, eid, error_text, fmt_runtime, fmt_time_left, hero_button,
+    muted, short_episode,
+};
 use super::poster::{PosterCard, poster_row, skeleton_row};
 use super::quickplay::{item_from_entry, play_title, play_video};
 use super::ratings::RatingBadges;
@@ -227,7 +230,9 @@ impl HomeView {
 
         let mut facts: Vec<String> = Vec::new();
         facts.extend(meta.year_label().map(str::to_string));
-        facts.extend(meta.runtime.clone());
+        if meta.kind != "series" {
+            facts.extend(meta.runtime.as_deref().map(fmt_runtime));
+        }
         facts.push(
             if meta.kind == "series" {
                 "Series"
@@ -374,12 +379,11 @@ impl HomeView {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let left = (entry.duration > 0.0).then(|| {
-                    let minutes = ((entry.duration - entry.position) / 60.0).round().max(1.0);
-                    format!("{minutes:.0} min left")
-                });
+                let left =
+                    (entry.duration > 0.0).then(|| fmt_time_left(entry.position, entry.duration));
                 let subtitle = match (&entry.episode_label, left) {
-                    (Some(ep), _) => Some(short_episode(ep)),
+                    (Some(ep), Some(left)) => Some(format!("{} · {left}", short_episode(ep))),
+                    (Some(ep), None) => Some(short_episode(ep)),
                     (None, left) => left,
                 };
                 PosterCard::new(eid(format!("continue-{i}")), entry.name.clone())
@@ -460,10 +464,6 @@ impl HomeView {
 }
 
 /// `S1 E2 · Pilot` → `S1 E2`, so the card's line stays short.
-fn short_episode(label: &str) -> String {
-    label.split(" · ").next().unwrap_or(label).to_string()
-}
-
 fn row(title: impl Into<SharedString>, body: AnyElement) -> Div {
     v_flex()
         .gap_2()

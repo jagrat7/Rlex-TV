@@ -252,7 +252,96 @@ pub fn fmt_speed(bytes_per_second: f64) -> String {
     format!("{:.1} MiB/s", bytes_per_second.max(0.0) / (1024.0 * 1024.0))
 }
 
-/// The first ten characters of an ISO date, or the string as it came.
+/// An ISO date as `Jan 20, 2008`, or the string as it came if it isn't one.
 pub fn fmt_date(iso: &str) -> String {
-    iso.get(..10).unwrap_or(iso).to_string()
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let date = iso.get(..10).unwrap_or(iso);
+    let mut parts = date.split('-').map(str::parse::<u32>);
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(year)), Some(Ok(month @ 1..=12)), Some(Ok(day @ 1..=31))) => {
+            format!("{} {day}, {year}", MONTHS[month as usize - 1])
+        }
+        _ => date.to_string(),
+    }
+}
+
+/// Minutes in a runtime such as `142 min`, `2h 22min` or `1 hr 56 min`.
+pub fn runtime_minutes(runtime: &str) -> Option<u32> {
+    let mut total = 0;
+    let mut chars = runtime.chars().peekable();
+    while let Some(c) = chars.next() {
+        let Some(digit) = c.to_digit(10) else {
+            continue;
+        };
+        let mut n = digit;
+        while let Some(d) = chars.peek().and_then(|c| c.to_digit(10)) {
+            n = n.checked_mul(10)?.checked_add(d)?;
+            chars.next();
+        }
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        // A number followed by `h` counts hours; anything else, minutes.
+        let hours = chars.peek().is_some_and(|c| c.eq_ignore_ascii_case(&'h'));
+        total += if hours { n.checked_mul(60)? } else { n };
+    }
+    (total > 0).then_some(total)
+}
+
+/// `S1 E3` from an episode label like `S1 E3 · Pilot`.
+pub fn short_episode(label: &str) -> String {
+    label.split(" · ").next().unwrap_or(label).to_string()
+}
+
+/// Minutes left of a video, rounded up, as `1h 59m left`.
+pub fn fmt_time_left(position_secs: f64, duration_secs: f64) -> String {
+    let left = ((duration_secs - position_secs) / 60.0).ceil().max(1.0) as u32;
+    format!("{} left", fmt_minutes(left))
+}
+
+/// `49m`, or `2h 22m` once it's over an hour.
+pub fn fmt_minutes(minutes: u32) -> String {
+    let (hours, rest) = (minutes / 60, minutes % 60);
+    if minutes <= 60 {
+        format!("{minutes}m")
+    } else if rest == 0 {
+        format!("{hours}h")
+    } else {
+        format!("{hours}h {rest}m")
+    }
+}
+
+/// A Cinemeta runtime in the `2h 22m` style, or as it came if it can't be read.
+pub fn fmt_runtime(runtime: &str) -> String {
+    runtime_minutes(runtime).map_or_else(|| runtime.to_string(), fmt_minutes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fmt_date, fmt_runtime, fmt_time_left};
+
+    #[test]
+    fn formats_runtimes() {
+        assert_eq!(fmt_runtime("49 min"), "49m");
+        assert_eq!(fmt_runtime("60 min"), "60m");
+        assert_eq!(fmt_runtime("61 min"), "1h 1m");
+        assert_eq!(fmt_runtime("142 min"), "2h 22m");
+        assert_eq!(fmt_runtime("120 min"), "2h");
+        assert_eq!(fmt_runtime("2h 22min"), "2h 22m");
+        assert_eq!(fmt_runtime("1 hr 56 min"), "1h 56m");
+        assert_eq!(fmt_runtime("N/A"), "N/A");
+    }
+
+    #[test]
+    fn formats_time_left() {
+        assert_eq!(fmt_time_left(3000.0, 10140.0), "1h 59m left");
+        assert_eq!(fmt_time_left(1200.0, 2900.0), "29m left");
+        assert_eq!(fmt_time_left(2899.0, 2900.0), "1m left");
+    }
+
+    #[test]
+    fn formats_dates() {
+        assert_eq!(fmt_date("2008-01-20T05:00:00.000Z"), "Jan 20, 2008");
+        assert_eq!(fmt_date("2008"), "2008");
+    }
 }

@@ -16,7 +16,8 @@ use gpui_kit::*;
 
 use super::common::{
     Load, TOP_BAR_HEIGHT, await_player, busy, card, eid, error_text, fmt_bytes, fmt_clock,
-    fmt_date, heading, hero_button, muted, page, skeleton_lines, still_starting,
+    fmt_date, fmt_minutes, fmt_runtime, fmt_time_left, heading, hero_button, muted, page,
+    runtime_minutes, short_episode, skeleton_lines, still_starting,
 };
 use super::poster::{PosterCard, poster_row, skeleton_row};
 use super::quickplay::{self, next_up, play_label, play_title, play_video};
@@ -295,8 +296,7 @@ impl DetailView {
         match &self.info {
             Info::Ready(meta) if meta.kind == "series" => {
                 let video = next_up(meta, &state.watch)?;
-                let label = video.label();
-                let short = label.split(" · ").next().unwrap_or(&label).to_string();
+                let short = short_episode(&video.label());
                 let text = play_label(state, &video.id, Some(&short));
                 Some((Primary::Video(self.play_item(Some(video))), text))
             }
@@ -380,7 +380,10 @@ impl DetailView {
         let mut facts: Vec<String> = Vec::new();
         if let Some(meta) = meta {
             facts.extend(meta.year_label().map(str::to_string));
-            facts.extend(meta.runtime.clone());
+            // A series' runtime is per episode, so it's shown on the episodes.
+            if meta.kind != "series" {
+                facts.extend(meta.runtime.as_deref().map(fmt_runtime));
+            }
             if meta.kind == "series" {
                 facts.push(match meta.seasons().iter().filter(|&&s| s > 0).count() {
                     0 => "Series".to_string(),
@@ -851,9 +854,11 @@ impl DetailView {
             }));
 
         let next = next_up(meta, &self.state.read(cx).watch).map(|v| v.id.clone());
+        // Cinemeta gives one typical episode length per series.
+        let runtime = meta.runtime.as_deref().and_then(runtime_minutes);
         let list = v_flex().children(episodes.into_iter().enumerate().map(|(i, video)| {
             let is_next = next.as_deref() == Some(video.id.as_str());
-            self.episode_row(i, video, is_next, cx)
+            self.episode_row(i, video, is_next, runtime, cx)
         }));
 
         v_flex()
@@ -881,6 +886,7 @@ impl DetailView {
         index: usize,
         video: Video,
         is_next: bool,
+        runtime: Option<u32>,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = cx.theme();
@@ -897,6 +903,22 @@ impl DetailView {
             .read(cx)
             .local_files(&self.target.id, Some(&video.id));
         let item = self.play_item(Some(&video));
+
+        // The player's own duration beats the series' typical one.
+        let duration = entry.as_ref().map(|e| e.duration).filter(|d| *d > 0.0);
+        let length = match (duration, progress) {
+            (Some(total), Some(_)) => Some(fmt_time_left(
+                entry.as_ref().map_or(0.0, |e| e.position),
+                total,
+            )),
+            (Some(total), None) => Some(fmt_minutes(((total / 60.0).round() as u32).max(1))),
+            (None, _) => runtime.map(fmt_minutes),
+        };
+        let subtitle = [video.released.as_deref().map(fmt_date), length]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("  ·  ");
         let group: SharedString = format!("episode-{index}").into();
 
         let on_disk = match files.len() {
@@ -1025,12 +1047,12 @@ impl DetailView {
                                 this.child(Tag::secondary().small().child(label))
                             }),
                     )
-                    .when_some(video.released.as_deref(), |this, released| {
+                    .when(!subtitle.is_empty(), |this| {
                         this.child(
                             div()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
-                                .child(fmt_date(released)),
+                                .child(subtitle),
                         )
                     })
                     .when_some(
