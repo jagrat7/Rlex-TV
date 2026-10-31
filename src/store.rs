@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::addons::Addon;
 
-/// User preferences: library folders, installed sources and the download folder.
+/// User preferences: library folders, installed sources, the download folder
+/// and the OMDb key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -17,6 +18,9 @@ pub struct Settings {
     /// Stremio addons the user added. Rlex ships with none.
     pub addons: Vec<Addon>,
     pub download_dir: Option<PathBuf>,
+    /// The user's own OMDb key, for Rotten Tomatoes and Metacritic scores.
+    #[serde(default)]
+    pub omdb_api_key: Option<String>,
 }
 
 impl Settings {

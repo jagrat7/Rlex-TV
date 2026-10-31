@@ -4,6 +4,7 @@
 mod addons;
 mod library;
 mod player;
+mod ratings;
 mod runtime;
 mod state;
 mod store;

@@ -84,6 +84,8 @@ pub struct AppState {
     client: addons::Client,
     /// The engine's startup, shared by everything waiting on it.
     engine_start: Option<EngineStart>,
+    /// OMDb scores; see the ratings block at the end.
+    ratings: RatingsState,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -98,6 +100,7 @@ impl AppState {
             scanning: false,
             client: addons::Client::new(),
             engine_start: None,
+            ratings: RatingsState::new(),
         };
         if torrent::has_saved_torrents() {
             // Resume them; the start is kept in `engine_start`.
@@ -646,5 +649,187 @@ impl AppState {
         if let Err(err) = store::save(WatchState::FILE, &self.watch) {
             log::error!("saving watch history: {err:#}");
         }
+    }
+}
+
+// Ratings
+
+use std::collections::HashMap;
+
+use crate::ratings::{Omdb, OmdbError, Ratings, RatingsCache};
+
+/// A ratings fetch, shared by everyone waiting on the same title.
+type RatingsFetch = Shared<Task<Result<Option<Ratings>, String>>>;
+
+/// OMDb scores: the disk cache, fetches in flight, and any problem with the key.
+struct RatingsState {
+    cache: RatingsCache,
+    client: Omdb,
+    in_flight: HashMap<String, RatingsFetch>,
+    /// The key itself failed (invalid, or out of quota). No title is fetched
+    /// until the key changes, so a bad key doesn't burn requests.
+    key_error: Option<String>,
+}
+
+impl RatingsState {
+    fn new() -> Self {
+        Self {
+            cache: RatingsCache::load(),
+            client: Omdb::new(),
+            in_flight: HashMap::new(),
+            key_error: None,
+        }
+    }
+}
+
+impl AppState {
+    /// Cached OMDb scores for an IMDb id, possibly older than a week. Never
+    /// fetches; use [`Self::load_ratings`] for that.
+    pub fn ratings(&self, imdb_id: &str) -> Option<Ratings> {
+        self.ratings.cache.get(imdb_id).map(|e| e.ratings.clone())
+    }
+
+    /// OMDb scores for a title, from the cache when fresh, otherwise fetched
+    /// once however many views ask. `Ok(None)` when no key is set or the id
+    /// isn't an IMDb id. Observers are notified when new scores arrive.
+    ///
+    /// Call this for the title being shown, never for catalog rows: the free
+    /// key allows 1000 requests a day.
+    pub fn load_ratings(
+        &mut self,
+        imdb_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<Option<Ratings>>> {
+        let Some(key) = self.omdb_key() else {
+            return Task::ready(Ok(None));
+        };
+        if !crate::ratings::is_imdb_id(imdb_id) {
+            return Task::ready(Ok(None));
+        }
+        if let Some(entry) = self.ratings.cache.get(imdb_id)
+            && entry.is_fresh(store::now())
+        {
+            return Task::ready(Ok(Some(entry.ratings.clone())));
+        }
+        if let Some(err) = &self.ratings.key_error {
+            return Task::ready(Err(anyhow!(err.clone())));
+        }
+
+        let fetch = match self.ratings.in_flight.get(imdb_id) {
+            Some(fetch) => fetch.clone(),
+            None => {
+                let id = imdb_id.to_string();
+                let client = self.ratings.client.clone();
+                let request = runtime::run({
+                    let (key, id) = (key.clone(), id.clone());
+                    async move { client.fetch(&key, &id).await }
+                });
+                let fetch = cx
+                    .spawn({
+                        let id = id.clone();
+                        async move |this, cx| {
+                            let result = request.await;
+                            this.update(cx, |this, cx| this.ratings_fetched(&id, &key, result, cx))
+                                .unwrap_or_else(|err| Err(format!("{err:#}")))
+                        }
+                    })
+                    .shared();
+                self.ratings.in_flight.insert(id, fetch.clone());
+                fetch
+            }
+        };
+        cx.spawn(async move |_, _| fetch.await.map_err(anyhow::Error::msg))
+    }
+
+    fn ratings_fetched(
+        &mut self,
+        imdb_id: &str,
+        key: &str,
+        result: anyhow::Result<Ratings>,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<Ratings>, String> {
+        let current_key = self.omdb_key();
+        if current_key.as_deref() == Some(key) {
+            self.ratings.in_flight.remove(imdb_id);
+        }
+        match result {
+            Ok(ratings) => {
+                self.ratings.cache.insert(imdb_id, ratings.clone());
+                self.ratings.cache.save();
+                cx.notify();
+                Ok(Some(ratings))
+            }
+            Err(err) => {
+                let message = format!("{err:#}");
+                let key_problem = err
+                    .downcast_ref::<OmdbError>()
+                    .is_some_and(OmdbError::is_key_error);
+                if key_problem && current_key.as_deref() == Some(key) {
+                    log::warn!("ratings: {message}");
+                    self.ratings.key_error = Some(message.clone());
+                    cx.notify();
+                }
+                Err(message)
+            }
+        }
+    }
+
+    /// Saves the OMDb key (`None` or blank removes it) and forgets any
+    /// problem the old key had.
+    pub fn set_omdb_key(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+        self.settings.omdb_api_key = key;
+        self.ratings.key_error = None;
+        self.ratings.in_flight.clear();
+        self.save_settings(cx);
+        cx.notify();
+    }
+
+    pub fn has_omdb_key(&self) -> bool {
+        self.omdb_key().is_some()
+    }
+
+    /// Why the saved key isn't working, if it isn't.
+    pub fn ratings_error(&self) -> Option<&str> {
+        self.ratings.key_error.as_deref()
+    }
+
+    /// Checks `key` with one OMDb request, without caching anything. Success
+    /// with the saved key clears its error.
+    pub fn test_omdb_key(
+        &self,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<Ratings>> {
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            return Task::ready(Err(anyhow!("Enter a key first")));
+        }
+        let client = self.ratings.client.clone();
+        let request = runtime::run({
+            let key = key.clone();
+            async move { client.test(&key).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let ratings = request.await?;
+            this.update(cx, |this, cx| {
+                if this.omdb_key().as_deref() == Some(key.as_str())
+                    && this.ratings.key_error.take().is_some()
+                {
+                    cx.notify();
+                }
+            })
+            .ok();
+            Ok(ratings)
+        })
+    }
+
+    fn omdb_key(&self) -> Option<String> {
+        self.settings
+            .omdb_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
     }
 }
