@@ -10,6 +10,7 @@ use gpui_kit::*;
 
 use super::DetailTarget;
 use crate::addons::{Meta, Video};
+use crate::library::LocalVideo;
 use crate::state::{AppState, FoundStream, StreamResults};
 use crate::watch::{PlayItem, WatchEntry, WatchState};
 
@@ -34,8 +35,9 @@ pub fn no_stream_reason(results: &StreamResults) -> anyhow::Error {
 }
 
 /// The episode to play next, in airing order (specials last): the latest
-/// one in progress, else the one after the latest finished, else the first.
-/// In-progress wins so ticking off an old episode doesn't move the pick.
+/// one in progress, else the first unfinished one after the latest finished,
+/// else the first. In-progress wins, and finished episodes are skipped, so
+/// ticking off an old episode doesn't move the pick back.
 pub fn next_up<'a>(meta: &'a Meta, watch: &WatchState) -> Option<&'a Video> {
     let episodes: Vec<&Video> = meta
         .seasons()
@@ -54,11 +56,19 @@ pub fn next_up<'a>(meta: &'a Meta, watch: &WatchState) -> Option<&'a Video> {
     if let Some(index) = latest(false) {
         return Some(episodes[index]);
     }
-    match latest(true) {
+    let Some(index) = latest(true) else {
+        return episodes.first().copied();
+    };
+    let watched = |v: &&&Video| watch.get(&v.id).is_some_and(|e| e.watched);
+    let after = &episodes[index + 1..];
+    after
+        .iter()
+        .find(|v| !watched(v))
+        // All of the rest seen: a rewatch, so go on in order.
+        .or(after.first())
         // Past the last episode, start the show again.
-        Some(index) => episodes.get(index + 1).or(episodes.first()).copied(),
-        None => episodes.first().copied(),
-    }
+        .or(episodes.first())
+        .copied()
 }
 
 /// What a Play button for `video` should say: Resume at a position, or Play.
@@ -198,7 +208,8 @@ pub fn play_title(
     })
 }
 
-/// An unmatched title: its first unfinished file, in episode order.
+/// An unmatched title: the file in progress, else its first unfinished file,
+/// in episode order.
 fn play_local_title(
     state: &Entity<AppState>,
     target: &DetailTarget,
@@ -209,9 +220,18 @@ fn play_local_title(
         return Task::ready(Err(anyhow!("This title is no longer in the library.")));
     };
     let videos = title.videos();
-    let video = videos
+    let entry = |v: &LocalVideo| s.watch_entry(&v.video_id);
+    let in_progress = videos
         .iter()
-        .find(|v| !s.watch_entry(&v.video_id).is_some_and(|e| e.watched))
+        .filter_map(|v| {
+            entry(v)
+                .filter(|e| !e.watched && e.position > 0.0)
+                .map(|e| (v, e))
+        })
+        .max_by_key(|(_, e)| e.updated)
+        .map(|(v, _)| v);
+    let video = in_progress
+        .or_else(|| videos.iter().find(|v| !entry(v).is_some_and(|e| e.watched)))
         .or(videos.first());
     let Some(video) = video else {
         return Task::ready(Err(anyhow!("No files found for this title.")));
@@ -291,6 +311,31 @@ mod tests {
         watch.record(&item("tt1:1:2"), 600.0, 3000.0);
         watch.entries.get_mut("tt1:1:2").unwrap().updated = 1;
         watch.set_watched(&item("tt1:1:1"), true);
+        assert_eq!(next_up(&meta, &watch).unwrap().id, "tt1:1:2");
+    }
+
+    #[test]
+    fn remarking_an_old_episode_skips_ones_already_seen() {
+        let meta = show();
+        let mut watch = WatchState::default();
+        for (n, id) in ["tt1:1:1", "tt1:1:2"].into_iter().enumerate() {
+            watch.set_watched(&item(id), true);
+            watch.entries.get_mut(id).unwrap().updated = n as u64;
+        }
+        // S1 E1 ticked again last: S1 E2 is done, so S2 E1 is next.
+        watch.entries.get_mut("tt1:1:1").unwrap().updated = 10;
+        assert_eq!(next_up(&meta, &watch).unwrap().id, "tt1:2:1");
+    }
+
+    #[test]
+    fn a_rewatch_goes_on_in_order() {
+        let meta = show();
+        let mut watch = WatchState::default();
+        for id in ["tt1:1:1", "tt1:1:2", "tt1:2:1", "tt1:0:1"] {
+            watch.set_watched(&item(id), true);
+            watch.entries.get_mut(id).unwrap().updated = 1;
+        }
+        watch.entries.get_mut("tt1:1:1").unwrap().updated = 10;
         assert_eq!(next_up(&meta, &watch).unwrap().id, "tt1:1:2");
     }
 }
