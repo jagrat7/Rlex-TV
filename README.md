@@ -47,6 +47,22 @@ cargo build --release && scripts/install-desktop.sh
 This puts the binary in `~/.local/bin`, the desktop entry in `~/.local/share/applications`,
 and the icons from `assets/logo/` into the hicolor theme.
 
+### Ratings
+
+IMDb scores come with Cinemeta. Rotten Tomatoes and Metacritic come from Wikidata, which
+needs no key and covers most well-known films. For what Wikidata lacks (mostly TV shows),
+Rlex asks [OMDb](https://www.omdbapi.com/apikey.aspx), which needs a free key. Build one in so
+every install has it:
+
+```sh
+RLEX_OMDB_KEY=your-key cargo build --release && scripts/install-desktop.sh
+```
+
+The key ends up inside the binary, so build in only a free key. Users can set their own under
+Settings → Ratings, which replaces the built-in one. Scores are cached for a week and only
+fetched for the title on screen, which keeps a free key's 1000 requests a day enough for a
+handful of people.
+
 ## How playback and progress work
 
 Rlex asks the desktop which app opens videos (`xdg-mime query default video/x-matroska`), reads

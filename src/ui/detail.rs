@@ -1,29 +1,33 @@
-//! Detail: one title, with its metadata, the sources of each video (copies
-//! on this computer first, then addon streams), and for a series its
-//! seasons and episodes.
+//! Detail: one title under its artwork, with one Play that picks the best
+//! source and resumes (for a series, the next-up episode). Episodes play
+//! when clicked. The full source list (copies on this computer first, then
+//! addon streams) folds out for when you want to choose.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::skeleton::Skeleton;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt, WindowExt, h_flex, v_flex,
+    ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::DetailTarget;
 use super::common::{
-    Load, busy, card, eid, error_text, fmt_bytes, fmt_clock, fmt_date, heading, muted, page,
-    skeleton_lines,
+    Load, TOP_BAR_HEIGHT, await_player, busy, card, eid, error_text, fmt_bytes, fmt_clock,
+    fmt_date, fmt_minutes, fmt_runtime, fmt_time_left, heading, hero_button, muted, page,
+    runtime_minutes, short_episode, skeleton_lines, still_starting,
 };
+use super::poster::{PosterCard, poster_row, skeleton_row};
+use super::quickplay::{self, next_up, play_label, play_title, play_video};
+use super::ratings::RatingBadges;
+use super::{DetailTarget, NavEvent};
 use crate::addons::{Meta, Video};
 use crate::library::{LocalFile, LocalVideo};
 use crate::state::{AppState, FoundStream, StreamResults};
 use crate::watch::PlayItem;
 
-const BACKDROP_HEIGHT: f32 = 320.;
 const POSTER_WIDTH: f32 = 170.;
 const POSTER_HEIGHT: f32 = 255.;
 
@@ -34,6 +38,19 @@ enum Info {
     Ready(Box<Meta>),
     Failed(String),
 }
+
+/// What the hero's Play button starts.
+enum Primary {
+    Video(PlayItem),
+    /// An unmatched title: its next file, found at click time.
+    LocalTitle,
+    /// Nothing on this computer and no sources: offer to add one.
+    NoSource,
+}
+
+/// Descriptions longer than this are cut in the hero, so they're shown in
+/// full under it too.
+const LONG_DESCRIPTION: usize = 320;
 
 pub struct DetailView {
     state: Entity<AppState>,
@@ -48,7 +65,13 @@ pub struct DetailView {
     starting: Option<String>,
     /// An episode to select as soon as the metadata arrives.
     preselect: Option<String>,
+    /// Whether a movie's source list is folded out.
+    show_sources: bool,
+    /// Popular titles sharing the first genre, once asked for.
+    similar: Option<Load<Vec<Meta>>>,
 }
+
+impl EventEmitter<NavEvent> for DetailView {}
 
 impl DetailView {
     pub fn new(state: Entity<AppState>, target: DetailTarget, cx: &mut Context<Self>) -> Self {
@@ -66,6 +89,8 @@ impl DetailView {
             streams: None,
             starting: None,
             preselect: None,
+            show_sources: false,
+            similar: None,
         };
         if !this.target.is_local() {
             this.load_meta(cx);
@@ -84,10 +109,18 @@ impl DetailView {
                 match result {
                     Ok(meta) => {
                         if meta.kind == "series" {
-                            this.season = meta.seasons().into_iter().next();
+                            // Open on the season you're watching.
+                            let watching =
+                                next_up(&meta, &this.state.read(cx).watch).and_then(|v| v.season);
+                            this.season = watching.or_else(|| meta.seasons().into_iter().next());
                         } else {
                             this.load_streams(meta.id.clone(), cx);
                         }
+                        let id = meta.id.clone();
+                        this.state
+                            .update(cx, |state, cx| state.load_ratings(&id, cx))
+                            .detach();
+                        this.load_similar(&meta, cx);
                         this.target.name = meta.name.clone();
                         this.target.poster = meta.poster.clone();
                         this.info = Info::Ready(Box::new(meta));
@@ -97,6 +130,32 @@ impl DetailView {
                     }
                     Err(err) => this.info = Info::Failed(format!("{err:#}")),
                 }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn load_similar(&mut self, meta: &Meta, cx: &mut Context<Self>) {
+        let Some(genre) = meta.genres().first().cloned() else {
+            return;
+        };
+        self.similar = Some(Load::Loading);
+        let (kind, own_id) = (meta.kind.clone(), meta.id.clone());
+        let task = self
+            .state
+            .update(cx, |state, cx| state.load_genre(&kind, &genre, cx));
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map(|items| {
+                items
+                    .into_iter()
+                    .filter(|m| m.id != own_id)
+                    .take(20)
+                    .collect::<Vec<_>>()
+            });
+            this.update(cx, |this, cx| {
+                this.similar = Some(Load::from_result(result));
                 cx.notify();
             })
             .ok();
@@ -152,18 +211,7 @@ impl DetailView {
 
     /// The history entry a video is recorded under.
     fn play_item(&self, video: Option<&Video>) -> PlayItem {
-        let (video_id, episode_label) = match video {
-            Some(video) => (video.id.clone(), Some(video.label())),
-            None => (self.target.id.clone(), None),
-        };
-        PlayItem {
-            meta_id: self.target.id.clone(),
-            kind: self.target.kind.clone(),
-            name: self.target.name.clone(),
-            poster: self.target.poster.clone(),
-            video_id,
-            episode_label,
-        }
+        quickplay::play_item(&self.target, video)
     }
 
     /// A history entry for a video of an unmatched title.
@@ -185,6 +233,10 @@ impl DetailView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.starting.is_some() {
+            still_starting(window, cx);
+            return;
+        }
         let key = file.path.to_string_lossy().into_owned();
         let task = self
             .state
@@ -199,6 +251,10 @@ impl DetailView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.starting.is_some() {
+            still_starting(window, cx);
+            return;
+        }
         let key = found.stream.dedupe_key();
         let task = self
             .state
@@ -214,26 +270,9 @@ impl DetailView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.starting.is_some() {
-            return;
-        }
         self.starting = Some(key);
         cx.notify();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            this.update_in(cx, |this, window, cx| {
-                this.starting = None;
-                if let Err(err) = result {
-                    window.push_notification(
-                        Notification::error(format!("Couldn't play: {err:#}")),
-                        cx,
-                    );
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        await_player(task, window, cx, |this: &mut Self| this.starting = None);
     }
 
     fn set_watched(&mut self, item: PlayItem, watched: bool, cx: &mut Context<Self>) {
@@ -243,8 +282,82 @@ impl DetailView {
 
     // Rendering
 
-    fn header(&self, cx: &mut Context<Self>) -> Div {
+    /// What the hero's Play starts, and what its button says: the movie,
+    /// the series' next-up episode, or an unmatched title's next file.
+    /// `None` until there's something to play.
+    fn primary(&self, cx: &App) -> Option<(Primary, String)> {
+        let state = self.state.read(cx);
+        let nothing_to_play = !self.target.is_local()
+            && state.sources().is_empty()
+            && state.local_files(&self.target.id, None).is_empty();
+        if nothing_to_play && matches!(self.info, Info::Ready(_)) {
+            return Some((Primary::NoSource, "Add a source to play".to_string()));
+        }
+        match &self.info {
+            Info::Ready(meta) if meta.kind == "series" => {
+                let video = next_up(meta, &state.watch)?;
+                let short = short_episode(&video.label());
+                let text = play_label(state, &video.id, Some(&short));
+                Some((Primary::Video(self.play_item(Some(video))), text))
+            }
+            Info::Ready(_) => {
+                let text = play_label(state, &self.target.id, None);
+                Some((Primary::Video(self.play_item(None)), text))
+            }
+            Info::Local => {
+                let title = state.library_title(&self.target.id)?;
+                (!title.files.is_empty()).then(|| (Primary::LocalTitle, "Play".to_string()))
+            }
+            Info::Loading | Info::Failed(_) => None,
+        }
+    }
+
+    /// The streams already found for `video_id`, so Play doesn't ask again.
+    fn known_streams(&self, video_id: &str) -> Option<StreamResults> {
+        match &self.streams {
+            Some((id, Load::Ready(results))) if id == video_id => Some(results.clone()),
+            _ => None,
+        }
+    }
+
+    fn play_primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((primary, _)) = self.primary(cx) else {
+            return;
+        };
+        match primary {
+            Primary::Video(item) => self.quick_play(item, window, cx),
+            Primary::NoSource => cx.emit(NavEvent::OpenSettings),
+            Primary::LocalTitle => {
+                if self.starting.is_some() {
+                    still_starting(window, cx);
+                    return;
+                }
+                self.starting = Some(self.target.id.clone());
+                cx.notify();
+                let task = play_title(&self.state, self.target.clone(), cx);
+                await_player(task, window, cx, |this: &mut Self| this.starting = None);
+            }
+        }
+    }
+
+    /// Plays one video with the best source there is, no questions asked.
+    fn quick_play(&mut self, item: PlayItem, window: &mut Window, cx: &mut Context<Self>) {
+        if self.starting.is_some() {
+            still_starting(window, cx);
+            return;
+        }
+        let known = self.known_streams(&item.video_id);
+        self.starting = Some(item.video_id.clone());
+        cx.notify();
+        let task = play_video(&self.state, item, known, cx);
+        await_player(task, window, cx, |this: &mut Self| this.starting = None);
+    }
+
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let actions = self.hero_actions(cx);
+        let resume = self.resume_line(cx);
         let theme = cx.theme();
+        let bg = theme.background;
         let meta = match &self.info {
             Info::Ready(meta) => Some(meta.as_ref()),
             _ => None,
@@ -257,14 +370,68 @@ impl DetailView {
             .map(|m| m.name.clone())
             .unwrap_or_else(|| self.target.name.clone())
             .into();
+        // Titles with metadata keep the backdrop's height from the start, so
+        // nothing jumps when the artwork arrives.
+        let height = if !self.target.is_local() {
+            (window.viewport_size().height * 0.62).clamp(px(400.), px(580.))
+        } else {
+            px(TOP_BAR_HEIGHT + POSTER_HEIGHT + 48.)
+        };
 
         let mut facts: Vec<String> = Vec::new();
         if let Some(meta) = meta {
             facts.extend(meta.year_label().map(str::to_string));
-            facts.extend(meta.imdb_rating.as_ref().map(|r| format!("★ {r}")));
-            facts.extend(meta.runtime.clone());
+            // A series' runtime is per episode, so it's shown on the episodes.
+            if meta.kind != "series" {
+                facts.extend(meta.runtime.as_deref().map(fmt_runtime));
+            }
+            if meta.kind == "series" {
+                facts.push(match meta.seasons().iter().filter(|&&s| s > 0).count() {
+                    0 => "Series".to_string(),
+                    1 => "1 season".to_string(),
+                    n => format!("{n} seasons"),
+                });
+            }
         }
-        let genres: Vec<String> = meta.map(|m| m.genres().to_vec()).unwrap_or_default();
+        let genres: Vec<String> = meta
+            .map(|m| m.genres().iter().take(4).cloned().collect())
+            .unwrap_or_default();
+        let ratings = (!self.target.is_local())
+            .then(|| {
+                RatingBadges::from_ratings(
+                    self.state.read(cx).ratings(&self.target.id).as_ref(),
+                    meta.and_then(|m| m.imdb_rating.as_deref()),
+                )
+            })
+            .filter(|badges| !badges.is_empty());
+
+        let title_text = {
+            let name = name.clone();
+            move || {
+                div()
+                    .text_size(px(40.))
+                    .line_height(px(46.))
+                    .font_bold()
+                    .line_clamp(2)
+                    .text_ellipsis()
+                    .child(name.clone())
+                    .into_any_element()
+            }
+        };
+        let title: AnyElement = match meta.and_then(|m| m.logo.clone()) {
+            Some(logo) if background.is_some() => div()
+                .flex()
+                .items_end()
+                .child(
+                    img(logo)
+                        .h(px(100.))
+                        .max_w(px(380.))
+                        .object_fit(ObjectFit::Contain)
+                        .with_fallback(title_text.clone()),
+                )
+                .into_any_element(),
+            _ => title_text(),
+        };
 
         let fallback_bg = theme.muted;
         let fallback_fg = theme.muted_foreground;
@@ -284,25 +451,100 @@ impl DetailView {
                         .text_center()
                         .text_color(fallback_fg)
                         .line_clamp(5)
+                        .text_ellipsis()
                         .child(fallback_name.clone()),
                 )
                 .into_any_element()
         };
-        let poster_image: AnyElement = match poster {
-            Some(url) => img(url)
-                .size_full()
-                .object_fit(ObjectFit::Cover)
-                .with_fallback(fallback)
-                .into_any_element(),
-            None => fallback(),
-        };
+        // The poster stands in for missing backdrop art.
+        let poster_tile = background.is_none().then(|| {
+            div()
+                .w(px(POSTER_WIDTH))
+                .h(px(POSTER_HEIGHT))
+                .flex_none()
+                .rounded(theme.radius_lg)
+                .overflow_hidden()
+                .bg(theme.muted)
+                .child(match poster {
+                    Some(url) => img(url)
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .with_fallback(fallback)
+                        .into_any_element(),
+                    None => fallback(),
+                })
+        });
+
+        let text = v_flex()
+            .flex_1()
+            .min_w_0()
+            .max_w(px(560.))
+            .gap_3()
+            .child(title)
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .flex_wrap()
+                    .children(ratings)
+                    .when(!facts.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.foreground.alpha(0.85))
+                                .child(facts.join("  ·  ")),
+                        )
+                    }),
+            )
+            .when(!genres.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(genres.join("  •  ")),
+                )
+            })
+            .when_some(meta.and_then(|m| m.description.clone()), |this, text| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .line_height(rems(1.45))
+                        .text_color(theme.foreground.alpha(0.9))
+                        .line_clamp(4)
+                        .text_ellipsis()
+                        .child(text),
+                )
+            })
+            .when_some(resume, |this, (progress, text)| {
+                this.child(
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .child(
+                            div()
+                                .w(px(180.))
+                                .h(px(4.))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(white().alpha(0.25))
+                                .child(div().h_full().w(relative(progress)).bg(theme.primary)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.foreground.alpha(0.85))
+                                .child(text),
+                        ),
+                )
+            })
+            .child(actions);
 
         div()
             .relative()
             .w_full()
-            .h(px(BACKDROP_HEIGHT))
+            .h(height)
             .overflow_hidden()
-            .bg(theme.secondary)
+            .bg(theme.secondary.opacity(0.5))
             .when_some(background, |this, url| {
                 this.child(
                     img(url)
@@ -311,57 +553,151 @@ impl DetailView {
                         .size_full()
                         .object_fit(ObjectFit::Cover),
                 )
+                .child(div().absolute().inset_0().bg(linear_gradient(
+                    90.,
+                    linear_color_stop(bg.alpha(0.92), 0.),
+                    linear_color_stop(bg.alpha(0.0), 0.7),
+                )))
             })
             .child(div().absolute().inset_0().bg(linear_gradient(
                 180.,
-                linear_color_stop(theme.background.alpha(0.35), 0.),
-                linear_color_stop(theme.background.alpha(0.96), 1.),
+                linear_color_stop(bg.alpha(0.0), 0.5),
+                linear_color_stop(bg, 1.),
             )))
             .child(
                 h_flex()
                     .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .right_0()
-                    .px_6()
-                    .pb_5()
+                    .left_6()
+                    .right_6()
+                    .bottom_6()
                     .gap_6()
                     .items_end()
-                    .child(
-                        div()
-                            .w(px(POSTER_WIDTH))
-                            .h(px(POSTER_HEIGHT))
-                            .flex_none()
-                            .rounded(theme.radius_lg)
-                            .overflow_hidden()
-                            .bg(theme.muted)
-                            .child(poster_image),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_2()
-                            .child(div().text_3xl().font_bold().truncate().child(name))
-                            .when(!facts.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child(facts.join("  ·  ")),
-                                )
-                            })
-                            .when(!genres.is_empty(), |this| {
-                                this.child(
-                                    h_flex().gap_2().flex_wrap().children(
-                                        genres
-                                            .into_iter()
-                                            .map(|genre| Tag::secondary().small().child(genre)),
-                                    ),
-                                )
-                            }),
-                    ),
+                    .children(poster_tile)
+                    .child(text),
             )
+    }
+
+    /// How far into the movie, or the series' next-up episode, playback got:
+    /// the bar's fill and `S1 E3 · 29m left`.
+    fn resume_line(&self, cx: &App) -> Option<(f32, String)> {
+        let Info::Ready(meta) = &self.info else {
+            return None;
+        };
+        let state = self.state.read(cx);
+        let (video_id, episode) = if meta.kind == "series" {
+            let video = next_up(meta, &state.watch)?;
+            let short = short_episode(&video.label());
+            (video.id.clone(), Some(short).filter(|s| !s.is_empty()))
+        } else {
+            (self.play_item(None).video_id, None)
+        };
+        let entry = state.watch_entry(&video_id)?;
+        if entry.watched || entry.duration <= 0.0 || entry.position <= 0.0 {
+            return None;
+        }
+        let left = fmt_time_left(entry.position, entry.duration);
+        let text = match episode {
+            Some(episode) => format!("{episode}  ·  {left}"),
+            None => left,
+        };
+        Some((entry.progress(), text))
+    }
+
+    /// Play (the best source, resuming), then for a movie the watched toggle
+    /// and the source list.
+    fn hero_actions(&self, cx: &mut Context<Self>) -> Div {
+        let primary = self.primary(cx);
+        let busy = match (&primary, &self.starting) {
+            (Some((Primary::Video(item), _)), Some(key)) => *key == item.video_id,
+            (Some((Primary::LocalTitle, _)), Some(key)) => *key == self.target.id,
+            _ => false,
+        };
+        let no_source = matches!(primary, Some((Primary::NoSource, _)));
+        let movie = self.target.kind != "series";
+        let mut row = h_flex().pt_2().gap_3().items_center();
+        match primary {
+            Some((_, label)) => {
+                let label = if busy {
+                    "Starting…".to_string()
+                } else {
+                    label
+                };
+                row = row.child(hero_button(
+                    "detail-play",
+                    if no_source {
+                        IconName::Plus
+                    } else {
+                        IconName::Play
+                    },
+                    label,
+                    !no_source,
+                    cx.listener(|this, _, window, cx| this.play_primary(window, cx)),
+                ));
+            }
+            None if matches!(self.info, Info::Loading) => {
+                row = row.child(Skeleton::new().w(px(150.)).h(px(42.)).rounded(px(6.)));
+            }
+            None => {}
+        }
+        if movie && !matches!(self.info, Info::Loading | Info::Failed(_)) {
+            let item = match &self.info {
+                Info::Local => self
+                    .state
+                    .read(cx)
+                    .library_title(&self.target.id)
+                    .and_then(|t| t.videos().into_iter().next())
+                    .map(|v| self.local_play_item(&v)),
+                _ => Some(self.play_item(None)),
+            };
+            if let Some(item) = item {
+                let watched = self
+                    .state
+                    .read(cx)
+                    .watch_entry(&item.video_id)
+                    .is_some_and(|e| e.watched);
+                row = row.child(hero_button(
+                    "detail-watched",
+                    if watched {
+                        IconName::CircleCheck
+                    } else {
+                        IconName::Circle
+                    },
+                    if watched { "Watched" } else { "Mark watched" },
+                    false,
+                    cx.listener(move |this, _, _, cx| this.set_watched(item.clone(), !watched, cx)),
+                ));
+            }
+            if !self.target.is_local() && !no_source {
+                let count = match &self.streams {
+                    Some((_, Load::Ready(results))) => results
+                        .streams
+                        .iter()
+                        .filter(|f| f.stream.is_playable())
+                        .count(),
+                    _ => 0,
+                };
+                let local = self.state.read(cx).local_files(&self.target.id, None).len();
+                let label = match count + local {
+                    0 => "Sources".to_string(),
+                    n => format!("Sources ({n})"),
+                };
+                row = row.child(hero_button(
+                    "detail-sources",
+                    if self.show_sources {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    },
+                    label,
+                    false,
+                    cx.listener(|this, _, _, cx| {
+                        this.show_sources = !this.show_sources;
+                        cx.notify();
+                    }),
+                ));
+            }
+        }
+        row
     }
 
     fn about(&self, meta: &Meta, cx: &mut Context<Self>) -> Div {
@@ -382,14 +718,63 @@ impl DetailView {
         v_flex()
             .gap_3()
             .max_w(px(900.))
-            .when_some(meta.description.clone(), |this, text| {
-                this.child(div().text_sm().line_height(rems(1.5)).child(text))
-            })
+            .when_some(
+                meta.description
+                    .clone()
+                    .filter(|text| text.len() > LONG_DESCRIPTION),
+                |this, text| this.child(div().text_sm().line_height(rems(1.5)).child(text)),
+            )
             .children(people("Director", &meta.director))
             .children(people("Cast", &meta.cast))
     }
 
-    fn body(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Popular titles in the same genre, Netflix's "More like this".
+    fn similar_row(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
+        let body: AnyElement = match self.similar.as_ref()? {
+            Load::Loading => skeleton_row(cx).into_any_element(),
+            Load::Failed(_) => return None,
+            Load::Ready(items) if items.is_empty() => return None,
+            Load::Ready(items) => {
+                let cards: Vec<PosterCard> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, meta)| {
+                        let target = DetailTarget::from_meta(meta);
+                        let play = target.clone();
+                        PosterCard::new(eid(format!("similar-{i}")), meta.name.clone())
+                            .poster(meta.poster.clone())
+                            .subtitle(meta.year_label().map(str::to_string))
+                            .rating(meta.imdb_rating.clone())
+                            .busy(self.starting.as_deref() == Some(meta.id.as_str()))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(NavEvent::OpenDetail(target.clone()))
+                            }))
+                            .on_play(cx.listener(move |this, _, window, cx| {
+                                if this.starting.is_some() {
+                                    still_starting(window, cx);
+                                    return;
+                                }
+                                this.starting = Some(play.id.clone());
+                                cx.notify();
+                                let task = play_title(&this.state, play.clone(), cx);
+                                await_player(task, window, cx, |this: &mut Self| {
+                                    this.starting = None
+                                });
+                            }))
+                    })
+                    .collect();
+                poster_row("similar-row", cards, window, cx).into_any_element()
+            }
+        };
+        Some(
+            v_flex()
+                .gap_3()
+                .child(heading("More like this"))
+                .child(body),
+        )
+    }
+
+    fn body(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match &self.info {
             Info::Loading => v_flex()
                 .gap_6()
@@ -408,10 +793,12 @@ impl DetailView {
                 } else {
                     self.movie_body(&meta, cx)
                 };
+                let similar = self.similar_row(window, cx);
                 v_flex()
-                    .gap_6()
-                    .child(self.about(&meta, cx))
+                    .gap_8()
                     .child(main)
+                    .children(similar)
+                    .child(self.about(&meta, cx))
                     .into_any_element()
             }
         }
@@ -438,11 +825,12 @@ impl DetailView {
         if self.target.kind != "series" {
             let video = &videos[0];
             let item = self.local_play_item(video);
-            return v_flex()
-                .gap_6()
-                .child(note)
-                .child(self.actions("movie", &video.versions, item.clone(), cx))
-                .child(self.sources_section(&video.versions, None, item, cx));
+            return v_flex().gap_6().child(note).child(self.sources_section(
+                &video.versions,
+                None,
+                item,
+                cx,
+            ));
         }
 
         let mut blocks: Vec<Div> = Vec::new();
@@ -480,10 +868,9 @@ impl DetailView {
     fn movie_body(&self, meta: &Meta, cx: &mut Context<Self>) -> Div {
         let item = self.play_item(None);
         let files = self.state.read(cx).local_files(&meta.id, None);
-        v_flex()
-            .gap_6()
-            .child(self.actions("movie", &files, item.clone(), cx))
-            .child(self.sources_section(&files, Some(&meta.id), item, cx))
+        v_flex().gap_6().when(self.show_sources, |this| {
+            this.child(self.sources_section(&files, Some(&meta.id), item, cx))
+        })
     }
 
     fn series_body(&self, meta: &Meta, cx: &mut Context<Self>) -> Div {
@@ -515,17 +902,24 @@ impl DetailView {
                     }))
             }));
 
-        let list = v_flex().gap_1().children(
-            episodes
-                .into_iter()
-                .enumerate()
-                .map(|(i, video)| self.episode_row(i, video, cx)),
-        );
+        let next = next_up(meta, &self.state.read(cx).watch).map(|v| v.id.clone());
+        // Cinemeta gives one typical episode length per series.
+        let runtime = meta.runtime.as_deref().and_then(runtime_minutes);
+        let list = v_flex().children(episodes.into_iter().enumerate().map(|(i, video)| {
+            let is_next = next.as_deref() == Some(video.id.as_str());
+            self.episode_row(i, video, is_next, runtime, cx)
+        }));
 
         v_flex()
             .gap_4()
-            .child(heading("Episodes"))
-            .child(selector)
+            .child(
+                h_flex()
+                    .gap_6()
+                    .items_center()
+                    .flex_wrap()
+                    .child(heading("Episodes"))
+                    .child(selector),
+            )
             .map(|this| {
                 if seasons.is_empty() {
                     this.child(muted("No episodes listed yet.", cx))
@@ -535,9 +929,18 @@ impl DetailView {
             })
     }
 
-    fn episode_row(&self, index: usize, video: Video, cx: &mut Context<Self>) -> Div {
+    /// One episode: clicking it plays, the chevron lists its sources.
+    fn episode_row(
+        &self,
+        index: usize,
+        video: Video,
+        is_next: bool,
+        runtime: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = cx.theme();
-        let selected = self.episode.as_deref() == Some(video.id.as_str());
+        let expanded = self.episode.as_deref() == Some(video.id.as_str());
+        let starting = self.starting.as_deref() == Some(video.id.as_str());
         let entry = self.state.read(cx).watch_entry(&video.id).cloned();
         let watched = entry.as_ref().is_some_and(|e| e.watched);
         let progress = entry
@@ -548,115 +951,225 @@ impl DetailView {
             .state
             .read(cx)
             .local_files(&self.target.id, Some(&video.id));
-        let video_id = video.id.clone();
+        let item = self.play_item(Some(&video));
+
+        // The player's own duration beats the series' typical one.
+        let duration = entry.as_ref().map(|e| e.duration).filter(|d| *d > 0.0);
+        let length = match (duration, progress) {
+            (Some(total), Some(_)) => Some(fmt_time_left(
+                entry.as_ref().map_or(0.0, |e| e.position),
+                total,
+            )),
+            (Some(total), None) => Some(fmt_minutes(((total / 60.0).round() as u32).max(1))),
+            (None, _) => runtime.map(fmt_minutes),
+        };
+        let subtitle = [video.released.as_deref().map(fmt_date), length]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("  ·  ");
+        let group: SharedString = format!("episode-{index}").into();
 
         let on_disk = match files.len() {
             0 => None,
             1 => Some("On disk".to_string()),
             n => Some(format!("{n} copies")),
         };
-        let status: AnyElement = if watched {
-            Icon::new(IconName::CircleCheck)
-                .size_4()
-                .text_color(theme.success)
-                .into_any_element()
-        } else if let Some(progress) = progress {
-            div()
-                .w(px(72.))
-                .h(px(4.))
-                .rounded_full()
-                .bg(theme.muted)
-                .child(
-                    div()
-                        .h_full()
-                        .rounded_full()
-                        .w(relative(progress))
-                        .bg(theme.primary),
-                )
-                .into_any_element()
-        } else {
-            div().into_any_element()
-        };
+        let number = video
+            .episode_number()
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        let title = video
+            .title()
+            .map(str::to_string)
+            .unwrap_or_else(|| video.label());
 
-        let row = h_flex()
-            .id(eid(format!("episode-{index}")))
-            .w_full()
-            .gap_3()
-            .px_3()
-            .py_2()
-            .items_center()
+        let thumb = div()
+            .relative()
+            .w(px(168.))
+            .h(px(94.))
+            .flex_none()
             .rounded(theme.radius)
-            .cursor_pointer()
-            .bg(if selected {
-                theme.list_active
-            } else {
-                theme.transparent
-            })
-            .hover(|this| this.bg(theme.list_hover))
-            .on_click(cx.listener(move |this, _, _, cx| this.select_episode(video_id.clone(), cx)))
+            .overflow_hidden()
+            .bg(theme.muted)
             .when_some(video.thumbnail.clone(), |this, url| {
+                this.child(img(url).size_full().object_fit(ObjectFit::Cover))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(black().alpha(0.35))
+                    .map(|this| {
+                        if starting {
+                            this.child(Spinner::new().color(white()))
+                        } else {
+                            this.invisible()
+                                .group_hover(group.clone(), |this| this.visible())
+                                .child(
+                                    div()
+                                        .size(px(40.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .border_2()
+                                        .border_color(white())
+                                        .bg(black().alpha(0.5))
+                                        .child(
+                                            Icon::new(IconName::Play).size_5().text_color(white()),
+                                        ),
+                                )
+                        }
+                    }),
+            )
+            .when_some(progress, |this, progress| {
                 this.child(
                     div()
-                        .w(px(96.))
-                        .h(px(54.))
-                        .flex_none()
-                        .rounded(theme.radius)
-                        .overflow_hidden()
-                        .bg(theme.muted)
-                        .child(img(url).size_full().object_fit(ObjectFit::Cover)),
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(4.))
+                        .bg(black().alpha(0.55))
+                        .child(div().h_full().w(relative(progress)).bg(theme.primary)),
                 )
-            })
+            });
+
+        let watched_item = item.clone();
+        let video_id = video.id.clone();
+        let play_item = item.clone();
+        // With nothing to play from, a click goes where a source is added.
+        let no_source = files.is_empty() && self.state.read(cx).sources().is_empty();
+        let row = h_flex()
+            .id(eid(format!("episode-{index}")))
+            .group(group.clone())
+            .w_full()
+            .gap_4()
+            .px_3()
+            .py_3()
+            .items_center()
+            .rounded(theme.radius_lg)
+            .cursor_pointer()
+            .border_b_1()
+            .border_color(theme.border.alpha(0.5))
+            .when(expanded || is_next, |this| this.bg(theme.list_active))
+            .hover(|this| this.bg(theme.list_hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if no_source {
+                    cx.emit(NavEvent::OpenSettings);
+                } else {
+                    this.quick_play(play_item.clone(), window, cx)
+                }
+            }))
+            .child(
+                div()
+                    .w(px(28.))
+                    .flex_none()
+                    .text_xl()
+                    .text_color(theme.muted_foreground)
+                    .text_center()
+                    .child(number),
+            )
+            .child(thumb)
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
+                    .gap_1()
                     .child(
-                        div()
-                            .text_sm()
-                            .font_medium()
-                            .truncate()
-                            .child(video.label()),
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().text_base().font_semibold().truncate().child(title))
+                            .when(is_next, |this| {
+                                this.child(Tag::primary().small().child(if progress.is_some() {
+                                    "Continue"
+                                } else {
+                                    "Next up"
+                                }))
+                            })
+                            .when_some(on_disk, |this, label| {
+                                this.child(Tag::secondary().small().child(label))
+                            }),
                     )
-                    .when_some(video.released.as_deref(), |this, released| {
+                    .when(!subtitle.is_empty(), |this| {
                         this.child(
                             div()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
-                                .child(fmt_date(released)),
+                                .child(subtitle),
                         )
-                    }),
+                    })
+                    .when_some(
+                        video.overview().filter(|o| !o.is_empty()),
+                        |this, overview| {
+                            this.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .line_clamp(2)
+                                    .text_ellipsis()
+                                    .child(overview.to_string()),
+                            )
+                        },
+                    ),
             )
-            .when_some(on_disk, |this, label| {
-                this.child(Tag::secondary().small().child(label))
-            })
-            .child(div().flex_none().child(status));
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .child(
+                        Button::new(eid(format!("episode-{index}-watched")))
+                            .ghost()
+                            .small()
+                            .icon(if watched {
+                                IconName::CircleCheck
+                            } else {
+                                IconName::Circle
+                            })
+                            .tooltip(if watched {
+                                "Watched. Click to unmark"
+                            } else {
+                                "Mark watched"
+                            })
+                            .when(watched, |this| this.text_color(theme.success))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                // The row behind plays on click; this doesn't.
+                                cx.stop_propagation();
+                                this.set_watched(watched_item.clone(), !watched, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(eid(format!("episode-{index}-sources")))
+                            .ghost()
+                            .small()
+                            .icon(if expanded {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .tooltip("Choose a source")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.select_episode(video_id.clone(), cx)
+                            })),
+                    ),
+            );
 
-        if !selected {
+        if !expanded {
             return div().w_full().child(row);
         }
-        let (accent, muted_fg) = (theme.primary, theme.muted_foreground);
-        let item = self.play_item(Some(&video));
-        v_flex().gap_1().child(row).child(
-            v_flex()
-                .gap_5()
-                .ml_3()
+        v_flex().w_full().child(row).child(
+            div()
+                .ml(px(44.))
                 .pl_4()
-                .py_3()
+                .py_4()
                 .border_l_2()
-                .border_color(accent)
-                .when_some(
-                    video.overview().filter(|o| !o.is_empty()),
-                    |this, overview| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .max_w(px(900.))
-                                .text_color(muted_fg)
-                                .child(overview.to_string()),
-                        )
-                    },
-                )
-                .child(self.actions("episode", &files, item.clone(), cx))
+                .border_color(theme.primary)
                 .child(self.sources_section(&files, Some(&video.id), item, cx)),
         )
     }
@@ -968,13 +1481,13 @@ impl DetailView {
 }
 
 impl Render for DetailView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = self.header(cx);
-        let body = self.body(cx);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let header = self.header(window, cx);
+        let body = self.body(window, cx);
         page("detail")
             .p_0()
             .gap_0()
             .child(header)
-            .child(v_flex().gap_6().p_6().child(body))
+            .child(v_flex().gap_6().px_6().pt_2().pb_8().child(body))
     }
 }

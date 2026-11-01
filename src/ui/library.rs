@@ -6,14 +6,18 @@ use gpui_kit::component::{Sizable, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use super::common::await_player;
 use super::common::{busy, eid, empty_state, page, page_title, pick_folders};
 use super::poster::{PosterCard, poster_grid};
+use super::quickplay::play_title;
 use super::{DetailTarget, NavEvent};
 use crate::library::LibraryTitle;
 use crate::state::AppState;
 
 pub struct LibraryView {
     state: Entity<AppState>,
+    /// The title whose player is starting from a card's Play button.
+    starting: Option<String>,
 }
 
 impl EventEmitter<NavEvent> for LibraryView {}
@@ -21,7 +25,21 @@ impl EventEmitter<NavEvent> for LibraryView {}
 impl LibraryView {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        Self { state }
+        Self {
+            state,
+            starting: None,
+        }
+    }
+
+    fn play(&mut self, target: DetailTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if self.starting.is_some() {
+            super::common::still_starting(window, cx);
+            return;
+        }
+        self.starting = Some(target.id.clone());
+        cx.notify();
+        let task = play_title(&self.state, target, cx);
+        await_player(task, window, cx, |this: &mut Self| this.starting = None);
     }
 
     fn add_folder_button(&self, id: &'static str, cx: &mut Context<Self>) -> Button {
@@ -57,11 +75,16 @@ impl Render for LibraryView {
                 .enumerate()
                 .map(|(i, title)| {
                     let target = DetailTarget::from_title(title);
+                    let play = target.clone();
                     PosterCard::new(eid(format!("library-{i}")), title.name.clone())
                         .poster(title.poster.clone())
                         .subtitle(card_subtitle(title))
+                        .busy(self.starting.as_deref() == Some(title.meta_id.as_str()))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(NavEvent::OpenDetail(target.clone()))
+                        }))
+                        .on_play(cx.listener(move |this, _, window, cx| {
+                            this.play(play.clone(), window, cx)
                         }))
                 })
                 .collect();
@@ -71,7 +94,7 @@ impl Render for LibraryView {
                 h_flex()
                     .justify_between()
                     .items_center()
-                    .child(page_title("Library"))
+                    .child(page_title("My Library"))
                     .child(
                         h_flex()
                             .gap_4()

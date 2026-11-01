@@ -84,6 +84,8 @@ pub struct AppState {
     client: addons::Client,
     /// The engine's startup, shared by everything waiting on it.
     engine_start: Option<EngineStart>,
+    /// Review scores; see the ratings block at the end.
+    ratings: RatingsState,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -98,6 +100,7 @@ impl AppState {
             scanning: false,
             client: addons::Client::new(),
             engine_start: None,
+            ratings: RatingsState::new(),
         };
         if torrent::has_saved_torrents() {
             // Resume them; the start is kept in `engine_start`.
@@ -327,6 +330,23 @@ impl AppState {
         cx.background_spawn(runtime::run(async move {
             client
                 .catalog(&catalog.base_url, &catalog.kind, &catalog.id, &[])
+                .await
+        }))
+    }
+
+    /// Cinemeta's popular titles of one kind in one genre, for "More like
+    /// this".
+    pub fn load_genre(
+        &self,
+        kind: &str,
+        genre: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<Vec<Meta>>> {
+        let client = self.client.clone();
+        let (kind, genre) = (kind.to_string(), genre.to_string());
+        cx.background_spawn(runtime::run(async move {
+            client
+                .catalog(CINEMETA_URL, &kind, "top", &[("genre", &genre)])
                 .await
         }))
     }
@@ -646,5 +666,250 @@ impl AppState {
         if let Err(err) = store::save(WatchState::FILE, &self.watch) {
             log::error!("saving watch history: {err:#}");
         }
+    }
+}
+
+// Ratings
+
+use std::collections::HashMap;
+
+use crate::ratings::{Fetched, OmdbError, Ratings, RatingsCache, Sources};
+
+/// A ratings fetch, shared by everyone waiting on the same title.
+type RatingsFetch = Shared<Task<Result<Option<Ratings>, String>>>;
+
+/// Review scores: the disk cache, fetches in flight, and any problem with
+/// the OMDb key.
+struct RatingsState {
+    cache: RatingsCache,
+    sources: Sources,
+    in_flight: HashMap<String, RatingsFetch>,
+    /// The OMDb key itself failed (invalid, or out of quota). Only Wikidata
+    /// is asked until the key changes or the problem expires, so a bad key
+    /// doesn't burn requests.
+    key_error: Option<KeyError>,
+}
+
+struct KeyError {
+    message: String,
+    /// Unix seconds when the key is tried again. A shared built-in key gets
+    /// its daily quota back, so a failure isn't forever.
+    retry_at: u64,
+}
+
+impl KeyError {
+    fn active(&self) -> bool {
+        store::now() < self.retry_at
+    }
+}
+
+impl RatingsState {
+    fn new() -> Self {
+        Self {
+            cache: RatingsCache::load(),
+            sources: Sources::new(),
+            in_flight: HashMap::new(),
+            key_error: None,
+        }
+    }
+}
+
+impl AppState {
+    /// Cached scores for an IMDb id, possibly older than a week. Never
+    /// fetches; use [`Self::load_ratings`] for that.
+    pub fn ratings(&self, imdb_id: &str) -> Option<Ratings> {
+        self.ratings.cache.get(imdb_id).map(|e| e.ratings.clone())
+    }
+
+    /// Scores for a title, from the cache when fresh, otherwise fetched once
+    /// however many views ask: Wikidata first, then OMDb for what it lacks.
+    /// `Ok(None)` when the id isn't an IMDb id. Observers are notified when
+    /// new scores arrive.
+    ///
+    /// Call this for the title being shown, never for catalog rows: the free
+    /// OMDb key allows 1000 requests a day.
+    pub fn load_ratings(
+        &mut self,
+        imdb_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<Option<Ratings>>> {
+        if !crate::ratings::is_imdb_id(imdb_id) {
+            return Task::ready(Ok(None));
+        }
+        if let Some(entry) = self.ratings.cache.get(imdb_id)
+            && entry.is_fresh(store::now())
+        {
+            return Task::ready(Ok(Some(entry.ratings.clone())));
+        }
+        let key = self.usable_omdb_key();
+
+        let fetch = match self.ratings.in_flight.get(imdb_id) {
+            Some(fetch) => fetch.clone(),
+            None => {
+                let id = imdb_id.to_string();
+                let sources = self.ratings.sources.clone();
+                let request = runtime::run({
+                    let (key, id) = (key.clone(), id.clone());
+                    async move { sources.fetch(key.as_deref(), &id).await }
+                });
+                let fetch = cx
+                    .spawn({
+                        let id = id.clone();
+                        async move |this, cx| {
+                            let result = request.await;
+                            this.update(cx, |this, cx| this.ratings_fetched(&id, key, result, cx))
+                                .unwrap_or_else(|err| Err(format!("{err:#}")))
+                        }
+                    })
+                    .shared();
+                self.ratings.in_flight.insert(id, fetch.clone());
+                fetch
+            }
+        };
+        cx.spawn(async move |_, _| fetch.await.map_err(anyhow::Error::msg))
+    }
+
+    fn ratings_fetched(
+        &mut self,
+        imdb_id: &str,
+        key: Option<String>,
+        result: anyhow::Result<Fetched>,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<Ratings>, String> {
+        // If the key changed meanwhile, this may drop a newer fetch for the
+        // same title; that only costs sharing it.
+        self.ratings.in_flight.remove(imdb_id);
+        let same_key = self.usable_omdb_key() == key;
+        // A key exists but was held back because it had failed.
+        let held_back = key.is_none() && self.omdb_key().is_some();
+        let (ratings, omdb_error) = match result {
+            Ok(Fetched {
+                ratings,
+                omdb_error,
+            }) => (Some(ratings), omdb_error),
+            Err(err) => (None, Some(err)),
+        };
+        let mut retry_soon = false;
+        let message = omdb_error.map(|err| {
+            let message = format!("{err:#}");
+            let key_problem = err
+                .downcast_ref::<OmdbError>()
+                .is_some_and(OmdbError::is_key_error);
+            if key_problem && same_key {
+                log::warn!("ratings: {message}");
+                self.ratings.key_error = Some(KeyError {
+                    message: message.clone(),
+                    retry_at: store::now() + crate::ratings::RETRY_SECS,
+                });
+            }
+            // Whatever went wrong, keep what Wikidata had until OMDb answers.
+            retry_soon = true;
+            message
+        });
+        let Some(ratings) = ratings else {
+            cx.notify();
+            return Err(message.unwrap_or_default());
+        };
+        // Scores fetched for an older key may lack what the new one adds;
+        // the next view fetches again.
+        if !same_key {
+            cx.notify();
+            return Ok(Some(ratings));
+        }
+        // Without a key that is only resting, OMDb may add more soon.
+        if !ratings.has_critics() && held_back {
+            retry_soon = true;
+        }
+        if retry_soon {
+            self.ratings.cache.insert_briefly(imdb_id, ratings.clone());
+        } else {
+            self.ratings.cache.insert(imdb_id, ratings.clone());
+        }
+        self.ratings.cache.save();
+        cx.notify();
+        Ok(Some(ratings))
+    }
+
+    /// Saves the user's own OMDb key (`None` or blank removes it, going back
+    /// to the built-in key), forgets any problem the old key had, and drops
+    /// cached titles the new key might fill in.
+    pub fn set_omdb_key(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+        self.settings.omdb_api_key = key;
+        self.ratings.key_error = None;
+        self.ratings.in_flight.clear();
+        self.ratings.cache.drop_incomplete();
+        self.ratings.cache.save();
+        self.save_settings(cx);
+        cx.notify();
+    }
+
+    /// Whether the user saved a key of their own.
+    pub fn has_own_omdb_key(&self) -> bool {
+        self.own_omdb_key().is_some()
+    }
+
+    /// Why the OMDb key isn't working, if it isn't.
+    pub fn ratings_error(&self) -> Option<&str> {
+        let error = self.ratings.key_error.as_ref().filter(|e| e.active())?;
+        Some(error.message.as_str())
+    }
+
+    /// Checks `key` (blank: the key in use) with one OMDb request, without
+    /// caching anything. Success with the key in use clears its error.
+    pub fn test_omdb_key(
+        &self,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<Ratings>> {
+        let key = match key.trim() {
+            "" => self.omdb_key(),
+            typed => Some(typed.to_string()),
+        };
+        let Some(key) = key else {
+            return Task::ready(Err(anyhow!("Enter a key first")));
+        };
+        let sources = self.ratings.sources.clone();
+        let request = runtime::run({
+            let key = key.clone();
+            async move { sources.test_omdb(&key).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let ratings = request.await?;
+            this.update(cx, |this, cx| {
+                if this.omdb_key().as_deref() == Some(key.as_str())
+                    && this.ratings.key_error.take().is_some()
+                {
+                    cx.notify();
+                }
+            })
+            .ok();
+            Ok(ratings)
+        })
+    }
+
+    fn own_omdb_key(&self) -> Option<String> {
+        self.settings
+            .omdb_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+    }
+
+    /// The user's key, else the one built in.
+    fn omdb_key(&self) -> Option<String> {
+        self.own_omdb_key()
+            .or_else(|| crate::ratings::built_in_key().map(str::to_string))
+    }
+
+    /// [`Self::omdb_key`], unless it failed within the last hour.
+    fn usable_omdb_key(&self) -> Option<String> {
+        let resting = self
+            .ratings
+            .key_error
+            .as_ref()
+            .is_some_and(KeyError::active);
+        self.omdb_key().filter(|_| !resting)
     }
 }
