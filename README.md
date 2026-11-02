@@ -47,6 +47,20 @@ cargo build --release && scripts/install-desktop.sh
 This puts the binary in `~/.local/bin`, the desktop entry in `~/.local/share/applications`,
 and the icons from `assets/logo/` into the hicolor theme.
 
+### Windows
+
+Each `v*` tag publishes a Windows build as a pre-release, built on GitHub's Windows runners
+(`.github/workflows/windows-release.yml`). It can't be cross-compiled from Linux: GPUI
+precompiles its DirectX shaders with Microsoft's `fxc.exe`, which only runs on Windows.
+
+```powershell
+curl.exe -LO https://github.com/jagrat7/Rlex-TV/releases/download/v0.1.0/rlex-windows-x64.exe
+.\rlex-windows-x64.exe
+```
+
+Videos open in Windows' default app for the file type, but progress isn't tracked yet (see
+below). Data lives in `%APPDATA%\rlex\`, downloads in `%USERPROFILE%\Downloads\Rlex\`.
+
 ### Ratings
 
 IMDb scores come with Cinemeta. Rotten Tomatoes and Metacritic come from Wikidata, which

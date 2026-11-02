@@ -1,0 +1,56 @@
+# Builds rlex.exe on Windows. GPUI's DirectX renderer precompiles its shaders with
+# Microsoft's fxc.exe at build time, which only runs on a Windows host, so this can't
+# be cross-compiled from Linux.
+#
+# A pushed `v*` tag publishes the exe as a GitHub pre-release. Pull requests that touch
+# this workflow or the dependencies, and manual runs, only upload it as a run artifact.
+name: Windows build
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/windows-release.yml
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        shell: bash
+        env:
+          # Optional repo secret; without it the exe has no built-in OMDb key.
+          RLEX_OMDB_KEY: ${{ secrets.RLEX_OMDB_KEY }}
+        run: |
+          cargo build --release --locked
+          mkdir -p dist
+          cp target/release/rlex.exe dist/rlex-windows-x64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rlex-windows-x64
+          path: dist/rlex-windows-x64.exe
+
+      - name: Publish pre-release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --prerelease --title "Rlex $TAG" --generate-notes
+          gh release upload "$TAG" dist/rlex-windows-x64.exe --clobber
