@@ -19,6 +19,7 @@ mod library;
 mod play;
 mod poster;
 mod ratings;
+mod scroll;
 mod search;
 mod settings;
 mod sources;
@@ -34,7 +35,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use rune::{AppSpec, Cx, El, Key, KeyEvent, Live, PointerButton, ScrollSpec, Tx, Waker, col, el};
+use rune::{AppSpec, Cx, El, Key, KeyEvent, Live, PointerButton, Tx, Waker, el};
 
 pub use bg::Bg;
 use detail::Detail;
@@ -56,7 +57,13 @@ pub fn run() {
         on_key: Some(on_key),
         ..AppSpec::new("Rlex", (1280.0, 800.0), || App::new(Bg::detached()), view)
     };
-    let app = rune::App::new(spec);
+    // Scroll bars show whenever a page overflows, as a desktop app's do with a
+    // mouse, rather than only while scrolling; `--scroll-bars` still chooses.
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.iter().any(|a| a == "--scroll-bars") {
+        args.extend(["--scroll-bars".into(), "always".into()]);
+    }
+    let app = rune::App::new(spec).args(args);
     let handle = app.handle();
     let ready = handle.clone();
     app.init(move || {
@@ -213,7 +220,8 @@ pub struct App {
     /// How solid the top bar is: clear over the top of a page, solid once it
     /// scrolls. Pages set it as they scroll, without running the view.
     pub bar: Live<f32>,
-    /// How far each page was scrolled, by `Page as usize`, to come back to.
+    /// Each page's scrolling, by `Page as usize`, to come back to where
+    /// it was left.
     scrolled: Rc<[Cell<f32>; 5]>,
     next_id: u64,
     started: bool,
@@ -340,21 +348,14 @@ pub fn on(action: Action) -> impl Fn(&mut App, &mut Tx) + 'static {
     move |s: &mut App, tx: &mut Tx| s.act(action.clone(), tx)
 }
 
-/// A page's scroll viewport. Scrolling it makes the top bar solid, and
-/// where it's left is where it comes back to.
-pub fn scroller(s: &App, page: Page) -> El {
+/// A page's scroll viewport over `content`. Scrolling it makes the top bar
+/// solid, and where it's left is where it comes back to.
+pub fn scroller(s: &App, page: Page, content: El) -> El {
     let (bar, scrolled) = (s.bar.clone(), s.scrolled.clone());
-    col()
-        .key(page.key())
-        .w_full()
-        .h_full()
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .on_scroll_offset(move |at| {
-            bar.set((at.offset[1] / 96.0).clamp(0.0, 1.0));
-            scrolled[page as usize].set(at.offset[1]);
-        })
+    scroll::scroll_area(page.key(), content, move |at| {
+        bar.set((at.offset[1] / 96.0).clamp(0.0, 1.0));
+        scrolled[page as usize].set(at.offset[1]);
+    })
 }
 
 fn view(s: &App, cx: &mut Cx<App>) -> El {

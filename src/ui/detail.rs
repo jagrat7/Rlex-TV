@@ -3,7 +3,7 @@
 //! episode). The page stays where it was underneath; Esc or a click outside
 //! goes back. "More like this" opens another sheet on top.
 
-use rune::{Color, Cx, El, ScrollSpec, SurfaceFit, Transition, Tx, col, el, row, text};
+use rune::{Color, Cx, El, SurfaceFit, Transition, Tx, col, el, row, text};
 
 use super::format::{fmt_runtime, fmt_time_left, short_episode};
 use super::home::{backdrop_shade, meta_strip, shelf, title_art};
@@ -308,16 +308,11 @@ pub fn sheet(s: &App, d: &Detail, cx: &mut Cx<App>) -> El {
                 .combined(Transition::opacity())
                 .springs(rune::SpringPair::new(motion::PANEL, motion::QUICK)),
         )
-        .child(
-            col()
-                .key(format!("detail-{}", d.id))
-                .w_full()
-                .h_full()
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(content.pb(64.0)),
-        )
+        .child(super::scroll::scroll_area(
+            &format!("detail-{}", d.id),
+            content.pb(64.0),
+            |_| {},
+        ))
         .child(
             Button::icon(&icons::CLOSE, "Close")
                 .variant(Variant::Glass)

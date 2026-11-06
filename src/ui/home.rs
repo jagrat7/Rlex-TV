@@ -147,7 +147,9 @@ pub fn page(s: &App, cx: &mut Cx<App>) -> El {
         };
         shelves = shelves.child(shelf(&row.catalog.title, body));
     }
-    scroller(s, Page::Home).child(
+    scroller(
+        s,
+        Page::Home,
         col()
             .key("home")
             .w_full()

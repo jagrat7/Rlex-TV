@@ -96,7 +96,7 @@ impl App {
 pub fn page(s: &App, cx: &mut Cx<App>) -> El {
     let titles: Rc<[LibraryTitle]> = s.core.library.titles().into();
     if titles.is_empty() {
-        return scroller(s, Page::Library).child(
+        return scroller(s, Page::Library,
             col().key("library")
                 .w_full()
                 .px(space::PAGE)
@@ -147,7 +147,9 @@ pub fn page(s: &App, cx: &mut Cx<App>) -> El {
         }
         line
     };
-    scroller(s, Page::Library).child(
+    scroller(
+        s,
+        Page::Library,
         col()
             .key("library-lines")
             .w_full()

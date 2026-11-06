@@ -108,7 +108,7 @@ pub fn page(s: &App, _: &mut rune::Cx<App>) -> El {
                 .children(s.downloads.list.iter().map(torrent_card)),
         )
     };
-    scroller(s, Page::Downloads).child(content)
+    scroller(s, Page::Downloads, content)
 }
 
 fn torrent_card(torrent: &TorrentInfo) -> El {

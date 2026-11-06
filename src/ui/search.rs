@@ -170,5 +170,5 @@ pub fn page(s: &App, cx: &mut Cx<App>) -> El {
             })
         }
     };
-    scroller(s, Page::Search).child(content)
+    scroller(s, Page::Search, content)
 }

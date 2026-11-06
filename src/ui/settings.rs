@@ -118,7 +118,7 @@ impl App {
 }
 
 pub fn page(s: &App, _: &mut Cx<App>) -> El {
-    scroller(s, Page::Settings).child(
+    scroller(s, Page::Settings,
         col().key("settings")
             .w_full()
             .max_w(840.0)
