@@ -32,12 +32,18 @@ zbus = { version = "5", default-features = false, features = ["async-io"] }
 
 [profile.dev]
 debug = "limited"
+# Rune's runtime is generic over the app's state, so most of its per-frame work is compiled
+# in this crate: unoptimized, scrolling misses frames on a fast display.
+opt-level = 1
 
 # Rune's layout, text and renderer, and the image decoders, are slow unoptimized; build
 # every dependency optimized so the dev app stays responsive. Only Rlex itself is debug.
+# Rune's debug-build checks (its perf and live-value warnings) cost a few milliseconds a
+# frame, more than a 240 Hz display allows, so dependencies build without them.
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
+debug-assertions = false
 
 [profile.release]
 strip = "symbols"
