@@ -4,8 +4,8 @@
 
 # Rlex
 
-A lean media center for the desktop, written in Rust with [GPUI](https://gpui.rs) and
-[GPUI Kit](https://github.com/longbridge/gpui-kit).
+A lean media center for the desktop, written in Rust with [Rune](https://github.com/anomalyco/rune),
+a GPU-rendered UI framework with its own layout, text and springs.
 
 - **Your folders, like Plex.** Point Rlex at your movie and TV folders. It reads release-style
   and Plex-style names, matches them to titles and posters, and keeps track of what you've
@@ -31,6 +31,8 @@ Requirements (Linux, X11 or Wayland):
 
 - Recent stable Rust via `rustup` (developed on 1.99)
 - A Vulkan driver (Mesa is fine, including older Intel)
+- To build: `libxkbcommon` and `wayland` development files (Arch: `pacman -S libxkbcommon wayland`;
+  Debian/Ubuntu: `apt install libxkbcommon-dev libwayland-dev`)
 - `xdg-utils`, and a default video player. mpv is recommended; any MPRIS-capable player works.
 
 ```sh
@@ -50,8 +52,7 @@ and the icons from `assets/logo/` into the hicolor theme.
 ### Windows
 
 Each `v*` tag publishes a Windows build as a pre-release, built on GitHub's Windows runners
-(`.github/workflows/windows-release.yml`). It can't be cross-compiled from Linux: GPUI
-precompiles its DirectX shaders with Microsoft's `fxc.exe`, which only runs on Windows.
+(`.github/workflows/windows-release.yml`).
 
 ```powershell
 curl.exe -LO https://github.com/jagrat7/Rlex-TV/releases/download/v0.1.0/rlex-windows-x64.exe
@@ -148,15 +149,15 @@ directly. Addons with catalogs also get rows on the home page.
 
 | Module | Does |
 | --- | --- |
-| `src/state.rs` | The app state entity every view shares; runs slow work on Tokio |
+| `src/state.rs` | The backend: settings, library, history, sources, ratings and the engine; slow work comes back as futures |
 | `src/addons.rs` | Stremio addon protocol client and types; Cinemeta |
 | `src/library.rs` | Folder scanning, release-name parsing, Cinemeta matching |
 | `src/torrent.rs` | librqbit session and the localhost streaming server |
 | `src/player.rs` | Default-player launch; mpv IPC and MPRIS progress tracking |
 | `src/watch.rs` | Watch history, resume points, Continue watching |
 | `src/store.rs` | Data paths and atomic JSON files |
-| `src/runtime.rs` | The Tokio runtime and how GPUI awaits it |
-| `src/ui/` | GPUI views |
+| `src/runtime.rs` | The Tokio runtime |
+| `src/ui/` | Rune views: one `App` state, pages as view functions, and `Bg`, which runs work on Tokio and hands the result back to the UI thread |
 
 ## Tests
 
@@ -165,4 +166,20 @@ cargo test                 # unit tests
 cargo test -- --ignored    # live checks: Cinemeta, a CC-licensed torrent, mpv and MPRIS
 ```
 
-The live player tests open video windows; run them with `--test-threads 1`.
+The live player tests open video windows; run them with `--test-threads 1`. The UI tests drive the
+real views headlessly through Rune's `Runtime`, on an empty backend.
+
+### Checking the UI without a window
+
+Every Rune app renders headlessly, so each page can be looked at, and driven, without opening a
+window. Named scenes (`src/ui/dev.rs`) start on a page:
+
+```sh
+cargo run -- --list-scenes                                    # home, library, search, movie, series, …
+cargo run -- --snap home.png --scene home --at 1              # a PNG of the page after a second
+cargo run -- --tree series.json --scene series --at 1         # every element: key, rect, text, role
+cargo run -- --script nav.json --snap after.png --at mark:end # taps, keys and scrolls, then a PNG
+```
+
+A headless run reads your real library and history but never saves anything, and waits for the
+network before each frame, so it shows what a window would a moment after launch.

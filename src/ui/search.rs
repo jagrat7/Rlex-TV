@@ -1,198 +1,174 @@
-//! Search results, grouped by the catalog that answered. The input lives
-//! in the shell's top bar; this view owns its state and runs the searches.
+//! Search: the box in the top bar, and results grouped by the catalog that
+//! answered. Typing anywhere starts a search; emptying the box goes back.
+//!
+//! Requests go through Rune's `Latest`: each keystroke supersedes the last,
+//! after a short pause, and only the newest answer lands.
 
-use gpui_kit::assets::IconName;
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::*;
+use std::time::Duration;
 
-use super::common::{
-    DEBOUNCE, Load, eid, empty_state, error_text, muted, page, page_title, section,
-};
-use super::poster::{PosterCard, poster_row, skeleton_row};
-use super::quickplay::play_title;
-use super::{DetailTarget, NavEvent};
-use crate::state::{AppState, CatalogRow};
+use rune::{Cx, El, Latest, TextEdit, Tx, Waker, col};
 
-enum Results {
-    Idle,
-    Loading,
-    Done(String, Load<Vec<CatalogRow>>),
+use super::poster::skeleton_strip;
+use super::theme::space;
+use super::topbar::BAR_H;
+use super::widgets::{empty_state, error_text, muted, page_title};
+use super::{App, Load, Page, home, icons, scroller};
+use crate::state::{CatalogRow, Core};
+
+/// The search field's key, to tell when it has the keyboard.
+pub const FIELD: &str = "search-field";
+
+type Answer = (String, Result<Vec<CatalogRow>, String>);
+
+pub struct Search {
+    pub edit: TextEdit,
+    latest: Latest<Answer>,
+    /// The last answer, and the query it answers.
+    shown: Option<(String, Load<Vec<CatalogRow>>)>,
+    /// Counts answers, so each set of result strips starts scrolled home.
+    version: u64,
 }
 
-pub struct SearchView {
-    state: Entity<AppState>,
-    input: Entity<InputState>,
-    results: Results,
-    /// Bumped on every keystroke and every search, so a stale debounce or a
-    /// slow earlier search can't overwrite a newer one.
-    generation: usize,
-    /// The title whose player is starting from a card's Play button.
-    starting: Option<String>,
-    _subscription: Subscription,
-}
-
-impl EventEmitter<NavEvent> for SearchView {}
-
-impl SearchView {
-    pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Titles, people, genres")
-                .clean_on_escape()
-        });
-        let subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| match event {
-            InputEvent::PressEnter { .. } => this.search_now(cx),
-            InputEvent::Change => this.search_soon(cx),
-            _ => {}
-        });
+impl Default for Search {
+    fn default() -> Self {
         Self {
-            state,
-            input,
-            results: Results::Idle,
-            generation: 0,
-            starting: None,
-            _subscription: subscription,
+            edit: TextEdit::new(""),
+            latest: Latest::default().debounce(Duration::from_millis(300)),
+            shown: None,
+            version: 0,
         }
-    }
-
-    /// The search box, for the top bar.
-    pub fn input(&self) -> Entity<InputState> {
-        self.input.clone()
-    }
-
-    /// Fills the box and searches straight away.
-    #[cfg(debug_assertions)]
-    pub fn set_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.input
-            .update(cx, |input, cx| input.set_value(query, window, cx));
-        self.search_now(cx);
-    }
-
-    fn search_soon(&mut self, cx: &mut Context<Self>) {
-        self.generation += 1;
-        let generation = self.generation;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(DEBOUNCE).await;
-            this.update(cx, |this, cx| {
-                if this.generation == generation {
-                    this.search_now(cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn search_now(&mut self, cx: &mut Context<Self>) {
-        self.generation += 1;
-        let generation = self.generation;
-        let query = self.input.read(cx).value().trim().to_string();
-        if query.is_empty() {
-            self.results = Results::Idle;
-            cx.notify();
-            return;
-        }
-        self.results = Results::Loading;
-        cx.notify();
-        let task = self.state.update(cx, |state, cx| state.search(&query, cx));
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |this, cx| {
-                if this.generation == generation {
-                    this.results = Results::Done(query, Load::from_result(result));
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn play(&mut self, target: DetailTarget, window: &mut Window, cx: &mut Context<Self>) {
-        if self.starting.is_some() {
-            super::common::still_starting(window, cx);
-            return;
-        }
-        self.starting = Some(target.id.clone());
-        cx.notify();
-        let task = play_title(&self.state, target, cx);
-        super::common::await_player(task, window, cx, |this: &mut Self| this.starting = None);
-    }
-
-    fn rows(&self, rows: &[CatalogRow], window: &mut Window, cx: &mut Context<Self>) -> Vec<Div> {
-        rows.iter()
-            .enumerate()
-            .map(|(r, row)| {
-                let cards: Vec<PosterCard> = row
-                    .items
-                    .iter()
-                    .enumerate()
-                    .map(|(i, meta)| {
-                        let target = DetailTarget::from_meta(meta);
-                        let play = target.clone();
-                        let busy = self.starting.as_deref() == Some(target.id.as_str());
-                        PosterCard::new(eid(format!("search-{r}-{i}")), meta.name.clone())
-                            .poster(meta.poster.clone())
-                            .subtitle(meta.year_label().map(str::to_string))
-                            .rating(meta.imdb_rating.clone())
-                            .busy(busy)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(NavEvent::OpenDetail(target.clone()))
-                            }))
-                            .on_play(cx.listener(move |this, _, window, cx| {
-                                this.play(play.clone(), window, cx)
-                            }))
-                    })
-                    .collect();
-                section(
-                    row.title.clone(),
-                    poster_row(
-                        ElementId::NamedInteger("search".into(), r as u64),
-                        cards,
-                        window,
-                        cx,
-                    ),
-                )
-            })
-            .collect()
     }
 }
 
-impl Render for SearchView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let results: Vec<AnyElement> = match &self.results {
-            Results::Idle => vec![
-                muted(
-                    "Type to search Cinemeta and any catalogs your sources offer.",
-                    cx,
-                )
-                .into_any_element(),
-            ],
-            Results::Loading => vec![skeleton_row(cx).into_any_element()],
-            Results::Done(_, Load::Failed(err)) => {
-                vec![error_text(format!("Search failed: {err}"), cx).into_any_element()]
-            }
-            Results::Done(query, Load::Ready(rows)) if rows.is_empty() => vec![
-                empty_state(
-                    IconName::SearchX,
-                    format!("No results for “{query}”"),
-                    "Try another spelling, or a shorter title.",
-                    cx,
-                )
-                .into_any_element(),
-            ],
-            Results::Done(_, Load::Ready(rows)) => self
-                .rows(rows, window, cx)
-                .into_iter()
-                .map(IntoElement::into_any_element)
-                .collect(),
-            Results::Done(_, Load::Loading) => vec![skeleton_row(cx).into_any_element()],
-        };
-
-        let heading = match &self.results {
-            Results::Done(query, _) => format!("Results for “{query}”"),
-            _ => "Search".to_string(),
-        };
-        page("search").child(page_title(heading)).children(results)
+impl Search {
+    pub fn set_waker(&self, waker: Waker) {
+        self.latest.set_waker(waker);
     }
+
+    pub fn query(&self) -> &str {
+        self.edit.text.trim()
+    }
+
+    /// Puts the keyboard in the box, with what's there selected.
+    pub fn focus(&mut self) {
+        self.edit.focused = true;
+        self.edit.set_selection(0, self.edit.text.len());
+    }
+
+    /// Starts the box with a key typed while nothing had focus.
+    pub fn type_first(&mut self, typed: &str) {
+        self.edit.replace_text(typed);
+        self.edit.set_caret(typed.len());
+        self.edit.focused = true;
+    }
+
+    /// Searches for what's in the box, after the debounce.
+    pub fn run_now(&mut self, core: &Core) {
+        let query = self.query().to_string();
+        let work = core.search(&query);
+        self.latest.request((query, work), |(query, work)| {
+            let rows = crate::runtime::get()
+                .block_on(work)
+                .map_err(|err| format!("{err:#}"));
+            (query, rows)
+        });
+    }
+
+    /// Waits, up to `timeout`, for a search in flight. Headless renders
+    /// only, as [`super::Bg::settle`].
+    pub fn settle(&self, timeout: Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.latest.is_pending() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Takes an answer that arrived; `true` when there was one.
+    pub fn land(&mut self) -> bool {
+        let Some((query, rows)) = self.latest.take() else {
+            return false;
+        };
+        self.shown = Some((query, Load::from_result(rows.map_err(anyhow::Error::msg))));
+        self.version += 1;
+        true
+    }
+
+    /// Shows `rows` as the answer to `query`, for scenes.
+    pub fn show(&mut self, query: &str, rows: anyhow::Result<Vec<CatalogRow>>) {
+        self.edit.replace_text(query);
+        self.shown = Some((query.to_string(), Load::from_result(rows)));
+        self.version += 1;
+    }
+}
+
+impl App {
+    /// Typing in the bar opens results; emptying it returns to where you
+    /// were.
+    pub fn search_changed(&mut self, tx: &mut Tx) {
+        if self.search.query().is_empty() {
+            self.search.latest.cancel();
+            self.search.shown = None;
+            if self.nav.page == Page::Search {
+                self.show(self.nav.before_search, tx);
+                self.nav.details.clear();
+            }
+            return;
+        }
+        if self.nav.page != Page::Search {
+            self.nav.before_search = self.nav.page;
+            self.show(Page::Search, tx);
+        }
+        self.nav.details.clear();
+        self.nav.parked.clear();
+        self.search.run_now(&self.core);
+    }
+}
+
+pub fn page(s: &App, cx: &mut Cx<App>) -> El {
+    let query = s.search.query();
+    let shown = s
+        .search
+        .shown
+        .as_ref()
+        .filter(|(q, _)| q == query)
+        .map(|(_, rows)| rows);
+    let title = match shown {
+        Some(_) => format!("Results for “{query}”"),
+        None => "Search".to_string(),
+    };
+    let mut content = col()
+        .key("search")
+        .w_full()
+        .pt(BAR_H + 28.0)
+        .pb(56.0)
+        .gap(space::SECTION)
+        .child(page_title(title).px(space::PAGE));
+    let pad = |e: El| col().w_full().px(space::PAGE).child(e);
+    content = match shown {
+        _ if query.is_empty() => content.child(pad(muted(
+            "Type to search Cinemeta and any catalogs your sources offer.",
+        ))),
+        None | Some(Load::Loading) => content.child(skeleton_strip()).child(skeleton_strip()),
+        Some(Load::Failed(err)) => content.child(pad(error_text(format!("Search failed: {err}")))),
+        Some(Load::Ready(rows)) if rows.is_empty() => content.child(empty_state(
+            &icons::SEARCH_X,
+            &format!("No results for “{query}”"),
+            "Try another spelling, or a shorter title.",
+        )),
+        Some(Load::Ready(rows)) => {
+            let scale = cx.env().scale;
+            rows.iter().enumerate().fold(content, |content, (i, row)| {
+                content.child(home::shelf(
+                    &row.title,
+                    home::meta_strip(
+                        s,
+                        &format!("search-{}-{i}", s.search.version),
+                        &row.items,
+                        scale,
+                    ),
+                ))
+            })
+        }
+    };
+    scroller(s, Page::Search, content)
 }

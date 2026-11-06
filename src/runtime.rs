@@ -1,9 +1,8 @@
-//! One Tokio runtime for networking and the torrent engine.
+//! One Tokio runtime for networking, the torrent engine and image decoding.
 //!
-//! GPUI runs its own executor. Futures spawned here resolve from any executor,
-//! so GPUI tasks can await network and engine work without blocking the UI.
+//! Rune owns the main thread. Work is spawned here, and its result comes back
+//! to the UI through [`crate::ui::Bg`].
 
-use std::future::Future;
 use std::sync::OnceLock;
 
 use tokio::runtime::Runtime;
@@ -18,15 +17,4 @@ pub fn get() -> &'static Runtime {
             .build()
             .expect("failed to start the Tokio runtime")
     })
-}
-
-/// Runs `fut` on the Tokio runtime and returns a future that resolves with its
-/// result from any executor.
-pub fn run<T, F>(fut: F) -> impl Future<Output = anyhow::Result<T>> + Send + 'static
-where
-    T: Send + 'static,
-    F: Future<Output = anyhow::Result<T>> + Send + 'static,
-{
-    let handle = get().spawn(fut);
-    async move { handle.await? }
 }

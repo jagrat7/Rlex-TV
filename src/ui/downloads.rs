@@ -1,276 +1,252 @@
-//! Downloads: the torrent engine's transfers, refreshed every second while
-//! the page is on screen.
+//! Downloads: the torrent engine's transfers. While the page shows, `poll`
+//! reads the engine's numbers once a second, and the view runs only when
+//! they changed.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::notification::Notification;
-use gpui_kit::component::progress::Progress;
-use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme, Sizable, StyledExt, WindowExt, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
+use rune::{Color, El, Tx, col, el, row, text};
 
-use super::common::{
-    busy, card, eid, empty_state, error_text, fmt_bytes, fmt_speed, page, page_title,
+use super::format::{fmt_bytes, fmt_speed};
+use super::theme::{float_shadow, space, t, ty};
+use super::topbar::BAR_H;
+use super::widgets::{
+    Button, Size, Tone, Variant, busy, empty_state, error_text, page_title, panel, progress, tag,
 };
-use crate::state::{AppState, EngineStatus};
+use super::{App, Page, icons, scroller};
+use crate::state::EngineStatus;
 use crate::torrent::TorrentInfo;
 
-const REFRESH: Duration = Duration::from_secs(1);
-/// The ticker stops once the page hasn't rendered for this long.
-const IDLE_STOP: Duration = Duration::from_secs(3);
-
-pub struct DownloadsView {
-    state: Entity<AppState>,
-    ticker: Option<Task<()>>,
-    last_render: Instant,
+#[derive(Default)]
+pub struct Downloads {
+    list: Vec<TorrentInfo>,
+    /// When to read the engine again, on the poll clock.
+    next: f64,
+    /// A download waiting on "keep or delete its files?".
+    pub(super) confirm: Option<(usize, String)>,
 }
 
-impl DownloadsView {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
-        Self {
-            state,
-            ticker: None,
-            last_render: Instant::now(),
+impl App {
+    /// While Downloads shows, reads the engine's numbers once a second;
+    /// `true` when they changed.
+    pub fn refresh_downloads(&mut self, clock: f64, tx: &mut Tx) -> bool {
+        if self.nav.page != Page::Downloads || !self.nav.details.is_empty() {
+            self.downloads.next = 0.0;
+            return false;
         }
-    }
-
-    /// Re-renders every second while the page keeps rendering; the engine's
-    /// numbers change without the state entity noticing.
-    fn keep_ticking(&mut self, cx: &mut Context<Self>) {
-        self.last_render = Instant::now();
-        if self.ticker.is_some() {
-            return;
+        let wait = self.downloads.next - clock;
+        if wait > 0.0 {
+            tx.wake_after(Duration::from_secs_f64(wait));
+            return false;
         }
-        self.ticker = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(REFRESH).await;
-                let keep_going = this.update(cx, |this, cx| {
-                    if this.last_render.elapsed() > IDLE_STOP {
-                        this.ticker = None;
-                        false
-                    } else {
-                        cx.notify();
-                        true
-                    }
-                });
-                if !matches!(keep_going, Ok(true)) {
-                    break;
-                }
-            }
-        }));
+        self.downloads.next = clock + 1.0;
+        tx.wake_after(Duration::from_secs(1));
+        let list = self.core.torrents();
+        let changed = list != self.downloads.list;
+        self.downloads.list = list;
+        changed
     }
 
-    fn run(&self, task: Task<anyhow::Result<()>>, window: &mut Window, cx: &mut Context<Self>) {
-        cx.spawn_in(window, async move |this, cx| {
-            if let Err(err) = task.await {
-                this.update_in(cx, |_, window, cx| {
-                    window.push_notification(Notification::error(format!("{err:#}")), cx);
-                })
-                .ok();
+    fn torrent_command(&mut self, id: usize, command: Command) {
+        let engine = match self.core.ready_engine() {
+            Ok(engine) => engine,
+            Err(err) => return self.toast_error(format!("{err:#}")),
+        };
+        let work = async move {
+            match command {
+                Command::Pause => engine.pause(id).await,
+                Command::Resume => engine.resume(id).await,
+                Command::Remove { delete_files } => engine.remove(id, delete_files).await,
             }
-        })
-        .detach();
-    }
-
-    fn toggle_pause(&mut self, torrent: &TorrentInfo, window: &mut Window, cx: &mut Context<Self>) {
-        let id = torrent.id;
-        let paused = torrent.paused;
-        let task = self.state.update(cx, |state, cx| {
-            if paused {
-                state.resume_torrent(id, cx)
-            } else {
-                state.pause_torrent(id, cx)
+        };
+        self.bg.run(work, |s, done, _| {
+            if let Err(err) = done {
+                s.toast_error(format!("{err:#}"));
             }
+            // Show the change now rather than within the second.
+            s.downloads.next = 0.0;
         });
-        self.run(task, window, cx);
     }
+}
 
-    fn confirm_remove(
-        &mut self,
-        torrent: &TorrentInfo,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let id = torrent.id;
-        let name = torrent.name.clone();
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
-            let remove = {
-                let this = this.clone();
-                move |delete_files: bool, window: &mut Window, cx: &mut App| {
-                    this.update(cx, |this, cx| {
-                        let task = this
-                            .state
-                            .update(cx, |state, cx| state.remove_torrent(id, delete_files, cx));
-                        this.run(task, window, cx);
-                    });
-                    window.close_dialog(cx);
-                }
-            };
-            let keep = remove.clone();
-            dialog
-                .title("Remove this download?")
-                .description(format!("“{name}” will be removed from the list. You can keep the downloaded files or delete them too."))
-                .footer(
-                    h_flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(
-                            Button::new("remove-cancel")
-                                .label("Cancel")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("remove-keep")
-                                .outline()
-                                .label("Keep files")
-                                .on_click(move |_, window, cx| keep(false, window, cx)),
-                        )
-                        .child(
-                            Button::new("remove-delete")
-                                .danger()
-                                .label("Delete files")
-                                .on_click(move |_, window, cx| remove(true, window, cx)),
-                        ),
+#[derive(Clone, Copy)]
+enum Command {
+    Pause,
+    Resume,
+    Remove { delete_files: bool },
+}
+
+pub fn page(s: &App, _: &mut rune::Cx<App>) -> El {
+    let status = match &s.core.engine {
+        EngineStatus::Starting => Some(busy("Starting the torrent engine…")),
+        EngineStatus::Failed(err) => Some(error_text(format!(
+            "The torrent engine isn't running: {err}"
+        ))),
+        EngineStatus::Off | EngineStatus::Ready(_) => None,
+    };
+    // The engine starts when needed, so "off" also means nothing downloading.
+    let idle = matches!(s.core.engine, EngineStatus::Ready(_) | EngineStatus::Off);
+    let mut content = col()
+        .key("downloads")
+        .w_full()
+        .px(space::PAGE)
+        .pt(BAR_H + 28.0)
+        .pb(56.0)
+        .gap(20.0)
+        .child(page_title("Downloads"))
+        .children(status);
+    content = if s.downloads.list.is_empty() && idle {
+        content.child(empty_state(
+            &icons::DOWNLOAD,
+            "Nothing downloading",
+            "Torrent streams you play show up here while they download.",
+        ))
+    } else {
+        content.child(
+            col()
+                .w_full()
+                .gap(12.0)
+                .children(s.downloads.list.iter().map(torrent_card)),
+        )
+    };
+    scroller(s, Page::Downloads, content)
+}
+
+fn torrent_card(torrent: &TorrentInfo) -> El {
+    let th = t();
+    let state = match (&torrent.error, torrent.paused, torrent.finished) {
+        (Some(_), ..) => tag("Error", Tone::Danger),
+        (None, true, _) => tag("Paused", Tone::Neutral),
+        (None, false, true) => tag("Finished", Tone::Success),
+        (None, false, false) => tag(torrent.state.clone(), Tone::Info),
+    };
+    let stats = [
+        format!(
+            "{} of {}",
+            fmt_bytes(torrent.downloaded_bytes),
+            fmt_bytes(torrent.total_bytes)
+        ),
+        format!("↓ {}", fmt_speed(torrent.down_speed)),
+        format!("↑ {}", fmt_speed(torrent.up_speed)),
+        format!("{} peers", torrent.peers),
+    ];
+    let (id, paused, name) = (torrent.id, torrent.paused, torrent.name.clone());
+    panel()
+        .key(format!("torrent-{id}"))
+        .padding(18.0)
+        .gap(12.0)
+        .child(
+            row()
+                .gap(12.0)
+                .center_y()
+                .child(
+                    text(torrent.name.clone())
+                        .font(ty::LABEL)
+                        .color(th.text)
+                        .truncate()
+                        .grow(1.0)
+                        .shrink(),
                 )
-        });
-    }
-
-    fn torrent_row(&self, torrent: TorrentInfo, cx: &mut Context<Self>) -> Div {
-        let theme = cx.theme();
-        let state_label = match (&torrent.error, torrent.paused, torrent.finished) {
-            (Some(_), ..) => Tag::danger().small().child("Error"),
-            (None, true, _) => Tag::secondary().small().child("Paused"),
-            (None, false, true) => Tag::success().small().child("Finished"),
-            (None, false, false) => Tag::info().small().child(torrent.state.clone()),
-        };
-        let stats = [
-            format!(
-                "{} / {}",
-                fmt_bytes(torrent.downloaded_bytes),
-                fmt_bytes(torrent.total_bytes)
-            ),
-            format!("↓ {}", fmt_speed(torrent.down_speed)),
-            format!("↑ {}", fmt_speed(torrent.up_speed)),
-            format!("{} peers", torrent.peers),
-        ];
-        let pause = torrent.clone();
-        let remove = torrent.clone();
-        card(cx)
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .font_medium()
-                            .truncate()
-                            .child(torrent.name.clone()),
-                    )
-                    .child(state_label),
-            )
-            .child(
-                Progress::new(eid(format!("torrent-progress-{}", torrent.id)))
-                    .value(torrent.progress.clamp(0.0, 1.0) * 100.)
-                    .h(px(6.)),
-            )
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .gap_4()
-                    .child(
-                        h_flex()
-                            .gap_4()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .children(stats),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new(eid(format!("torrent-pause-{}", torrent.id)))
-                                    .small()
-                                    .outline()
-                                    .icon(if torrent.paused {
-                                        IconName::Play
-                                    } else {
-                                        IconName::Pause
-                                    })
-                                    .label(if torrent.paused { "Resume" } else { "Pause" })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.toggle_pause(&pause, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(eid(format!("torrent-remove-{}", torrent.id)))
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Trash)
-                                    .label("Remove")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.confirm_remove(&remove, window, cx)
-                                    })),
-                            ),
-                    ),
-            )
-            .when_some(torrent.error.clone(), |this, err| {
-                this.child(error_text(err, cx))
-            })
-    }
+                .child(state),
+        )
+        .child(progress(
+            torrent.progress,
+            6.0,
+            th.raised2,
+            if torrent.finished {
+                th.success
+            } else {
+                th.accent
+            },
+        ))
+        .child(
+            row()
+                .gap(16.0)
+                .center_y()
+                .justify_between()
+                .child(
+                    row()
+                        .gap(18.0)
+                        .children(stats.map(|s| text(s).font(ty::CAPTION).color(th.muted))),
+                )
+                .child(
+                    row()
+                        .gap(8.0)
+                        .child(
+                            Button::new(if paused { "Resume" } else { "Pause" })
+                                .with_icon(if paused { &icons::PLAY } else { &icons::PAUSE })
+                                .size(Size::Small)
+                                .on_press(move |s: &mut App, _| {
+                                    s.torrent_command(
+                                        id,
+                                        if paused {
+                                            Command::Resume
+                                        } else {
+                                            Command::Pause
+                                        },
+                                    )
+                                })
+                                .build(),
+                        )
+                        .child(
+                            Button::new("Remove")
+                                .with_icon(&icons::TRASH)
+                                .variant(Variant::Ghost)
+                                .size(Size::Small)
+                                .on_press(move |s: &mut App, _| {
+                                    s.downloads.confirm = Some((id, name.clone()))
+                                })
+                                .build(),
+                        ),
+                ),
+        )
+        .children(torrent.error.clone().map(error_text))
 }
 
-impl Render for DownloadsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.keep_ticking(cx);
-        let (torrents, status) = {
-            let state = self.state.read(cx);
-            let status = match &state.engine {
-                EngineStatus::Starting => Some(busy("Starting the torrent engine…", cx)),
-                EngineStatus::Failed(err) => Some(error_text(
-                    format!("The torrent engine isn't running: {err}"),
-                    cx,
-                )),
-                EngineStatus::Off | EngineStatus::Ready(_) => None,
-            };
-            (state.torrents(), status)
-        };
-        // The engine starts lazily, so "off" also means nothing downloading.
-        let idle = matches!(
-            self.state.read(cx).engine,
-            EngineStatus::Ready(_) | EngineStatus::Off
+/// "Remove this download?", while one waits on the answer.
+pub fn confirm_dialog(s: &App) -> Option<El> {
+    let (id, name) = s.downloads.confirm.clone()?;
+    let th = t();
+    let answer = move |delete_files: bool| {
+        move |s: &mut App, _: &mut Tx| {
+            s.downloads.confirm = None;
+            s.torrent_command(id, Command::Remove { delete_files });
+        }
+    };
+    let dialog = col().key("confirm-remove")
+        .w(460.0)
+        .padding(24.0)
+        .gap(12.0)
+        .radius(14.0)
+        .fill(th.raised)
+        .border(1.0, th.line)
+        .box_shadow(float_shadow())
+        .role("alertdialog")
+        .label("Remove this download?")
+        .modal(true, |s: &mut App| s.downloads.confirm = None)
+        .transition(rune::Transition::scale(0.96).combined(rune::Transition::opacity()))
+        .child(text("Remove this download?").font(ty::HEADING).color(th.text))
+        .child(
+            text(format!(
+                "“{name}” will be removed from the list. You can keep the downloaded files or delete them too."
+            ))
+            .font(ty::BODY)
+            .color(th.muted)
+            .wrap(),
+        )
+        .child(
+            row().gap(8.0)
+                .pt(12.0)
+                .justify_end()
+                .child(Button::new("Cancel").variant(Variant::Ghost).on_press(|s: &mut App, _| s.downloads.confirm = None).build())
+                .child(Button::new("Keep files").on_press(answer(false)).build())
+                .child(Button::new("Delete files").variant(Variant::Danger).on_press(answer(true)).build()),
         );
-        let rows: Vec<Div> = torrents
-            .into_iter()
-            .map(|torrent| self.torrent_row(torrent, cx))
-            .collect();
-
-        page("downloads")
-            .child(page_title("Downloads"))
-            .when_some(status, |this, status| this.child(status))
-            .map(|this| {
-                if rows.is_empty() && idle {
-                    this.child(empty_state(
-                        IconName::Download,
-                        "Nothing downloading",
-                        "Torrent streams you play show up here while they download.",
-                        cx,
-                    ))
-                } else {
-                    this.child(v_flex().gap_3().children(rows))
-                }
-            })
-    }
+    Some(
+        el().key("confirm-layer")
+            .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+            .center()
+            .fill(Color::BLACK.alpha(0.55))
+            .transition(rune::Transition::opacity())
+            .child(dialog),
+    )
 }

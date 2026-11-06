@@ -29,7 +29,7 @@ pub struct Engine {
 }
 
 /// A torrent's state, for the downloads page.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TorrentInfo {
     pub id: usize,
     pub name: String,

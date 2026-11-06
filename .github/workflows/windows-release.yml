@@ -1,6 +1,4 @@
-# Builds rlex.exe on Windows. GPUI's DirectX renderer precompiles its shaders with
-# Microsoft's fxc.exe at build time, which only runs on a Windows host, so this can't
-# be cross-compiled from Linux.
+# Builds rlex.exe on GitHub's Windows runners.
 #
 # A pushed `v*` tag publishes the exe as a GitHub pre-release. Pull requests that touch
 # this workflow or the dependencies, and manual runs, only upload it as a run artifact.

@@ -12,30 +12,13 @@ mod torrent;
 mod ui;
 mod watch;
 
-use std::sync::Arc;
-
-use gpui_kit::AppContext as _;
-
 fn main() {
-    env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .default_filter_or("info,librqbit=warn,librqbit_dht=warn,tracing=warn"),
-    )
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
+        "info,librqbit=warn,librqbit_dht=warn,tracing=warn,zbus=warn,wgpu_hal=warn,naga=warn",
+    ))
     .init();
-
-    // Entered for the whole run so GPUI's HTTP client (posters) shares the runtime.
-    let _runtime = runtime::get().enter();
-
-    // The component library's icons come from its asset bundle.
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
-    app.run(|cx| {
-        gpui_kit::init(cx);
-        match reqwest_client::ReqwestClient::user_agent(concat!("Rlex/", env!("CARGO_PKG_VERSION")))
-        {
-            Ok(client) => cx.set_http_client(Arc::new(client)),
-            Err(err) => log::error!("posters won't load: {err:#}"),
-        }
-        let state = cx.new(state::AppState::new);
-        ui::open_main_window(state, cx);
-    });
+    // Wayland compositors find the icon through the desktop entry with this id.
+    rune::set_app_id("rlex");
+    rune::prewarm_gpu();
+    ui::run();
 }
