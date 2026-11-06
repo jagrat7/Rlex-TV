@@ -2,7 +2,7 @@
 name = "rlex"
 version = "0.1.0"
 edition = "2024"
-description = "A lean media center: your folders, Stremio addons and torrent streaming, in GPUI."
+description = "A lean media center: your folders, Stremio addons and torrent streaming, in Rune."
 publish = false
 
 [dependencies]
@@ -10,9 +10,8 @@ anyhow = "1"
 dirs = "6"
 env_logger = "0.11"
 futures = "0.3"
-gpui-kit = "=0.8.1"
-# Decodes the window icon; the version GPUI's `WindowOptions::icon` expects.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Decodes and resizes artwork to the size it's drawn at, on the Tokio blocking pool.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 librqbit = { version = "9.0.1", default-features = false, features = ["http-api", "rust-tls", "tracing-subscriber-utils"] }
 # The listener type librqbit's streaming server takes. `http-api` only compiles
 # with `tracing-subscriber-utils` (librqbit 9.0.1).
@@ -20,7 +19,9 @@ librqbit-dualstack-sockets = "0.7"
 log = "0.4"
 regex = "1"
 reqwest = { version = "0.13", features = ["json"] }
-reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.10" }
+# Rune is pre-release: pin a rev of its `dev` branch, which is never rewritten.
+rune = { git = "https://github.com/anomalyco/rune", rev = "8ee30954add065098f043335ece9d9ea0914d21d", features = ["native-file-dialog"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "8ee30954add065098f043335ece9d9ea0914d21d" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "process", "time", "sync", "macros"] }
@@ -32,18 +33,11 @@ zbus = { version = "5", default-features = false, features = ["async-io"] }
 [profile.dev]
 debug = "limited"
 
-# GPUI's layout, text and rendering crates are slow unoptimized; build them at -O3
-# even in debug so the dev app stays responsive.
-[profile.dev.package]
-gpui-pre = { opt-level = 3 }
-gpui-pre-platform = { opt-level = 3 }
-gpui-pre-wgpu = { opt-level = 3 }
-taffy = { opt-level = 3 }
-resvg = { opt-level = 3 }
-rustybuzz = { opt-level = 3 }
-ttf-parser = { opt-level = 3 }
-smol = { opt-level = 3 }
-image = { opt-level = 3 }
+# Rune's layout, text and renderer, and the image decoders, are slow unoptimized; build
+# every dependency optimized so the dev app stays responsive. Only Rlex itself is debug.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
 
 [profile.release]
 strip = "symbols"

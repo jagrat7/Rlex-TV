@@ -1,31 +1,30 @@
-//! The backend facade every view shares: settings, the local library, watch
-//! history, installed sources and the torrent engine, as one GPUI entity.
+//! The backend every page shares: settings, the local library, watch
+//! history, installed sources, review scores and the torrent engine.
 //!
-//! Slow work (network, disk scans, the engine) runs on the Tokio runtime;
-//! methods hand back GPUI tasks so views can await results. Changes to the
-//! state itself call `cx.notify()`, so views that observe it re-render.
+//! Nothing here knows about the UI. Slow work is handed back as `Send`
+//! futures for the UI to run on Tokio ([`crate::ui::Bg`]); what they return
+//! comes back through the plain methods that apply it.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use futures::FutureExt as _;
-use futures::future::{Shared, join_all};
-use gpui_kit::{AppContext as _, Context, EventEmitter, SharedString, Task};
+use futures::future::{BoxFuture, Shared, join_all};
 
 use crate::addons::{self, Addon, CINEMETA_URL, Meta, Stream};
-use crate::library::{self, Library, LibraryTitle, LocalFile};
-use crate::player::{self, Launch, Progress};
-use crate::runtime;
+use crate::library::{Library, LibraryTitle, LocalFile};
+use crate::ratings::{Fetched, OmdbError, Ratings, RatingsCache, Sources};
 use crate::store::{self, Settings};
-use crate::torrent::{self, Engine, TorrentInfo};
-use crate::watch::{PlayItem, WatchEntry, WatchState};
+use crate::torrent::{Engine, TorrentInfo};
+use crate::watch::WatchState;
 
 const SETTINGS_FILE: &str = "settings.json";
 
-/// The engine starting up; resolves to it, or to why it failed.
-type EngineStart = Shared<Task<Result<Arc<Engine>, String>>>;
+/// The engine starting up, shared by everything waiting on it.
+pub type EngineStart = Shared<BoxFuture<'static, Result<Arc<Engine>, String>>>;
 
 pub enum EngineStatus {
     /// Not needed yet: it starts when a torrent first plays, or with the app
@@ -36,15 +35,8 @@ pub enum EngineStatus {
     Failed(String),
 }
 
-/// Background problems and confirmations worth a toast.
-#[derive(Clone, Debug)]
-pub enum AppEvent {
-    Notice(SharedString),
-    Error(SharedString),
-}
-
 /// A catalog an addon offers, shown as a row of posters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CatalogRef {
     pub title: String,
     pub base_url: String,
@@ -75,24 +67,27 @@ pub struct StreamResults {
     pub asked: usize,
 }
 
-pub struct AppState {
+impl StreamResults {
+    pub fn playable(&self) -> impl Iterator<Item = &FoundStream> {
+        self.streams.iter().filter(|f| f.stream.is_playable())
+    }
+}
+
+pub struct Core {
     pub settings: Settings,
     pub library: Library,
     pub watch: WatchState,
     pub engine: EngineStatus,
     pub scanning: bool,
-    client: addons::Client,
-    /// The engine's startup, shared by everything waiting on it.
+    pub client: addons::Client,
     engine_start: Option<EngineStart>,
-    /// Review scores; see the ratings block at the end.
     ratings: RatingsState,
 }
 
-impl EventEmitter<AppEvent> for AppState {}
-
-impl AppState {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let mut this = Self {
+impl Core {
+    /// Everything saved last time.
+    pub fn load() -> Self {
+        Self {
             settings: store::load(SETTINGS_FILE),
             library: store::load(Library::FILE),
             watch: store::load(WatchState::FILE),
@@ -101,145 +96,93 @@ impl AppState {
             client: addons::Client::new(),
             engine_start: None,
             ratings: RatingsState::new(),
-        };
-        if torrent::has_saved_torrents() {
-            // Resume them; the start is kept in `engine_start`.
-            drop(this.engine(cx));
         }
-        if !this.settings.library_folders.is_empty() {
-            this.rescan(false, cx);
-        }
-        this
     }
 
-    /// The torrent engine, starting it if it isn't running. After a failed
-    /// start, the next call tries again.
-    fn engine(&mut self, cx: &mut Context<Self>) -> EngineStart {
+    /// Nothing saved: no folders, sources, history or scores, for tests.
+    #[cfg(test)]
+    pub fn empty() -> Self {
+        Self {
+            settings: Settings::default(),
+            library: Library::default(),
+            watch: WatchState::default(),
+            engine: EngineStatus::Off,
+            scanning: false,
+            client: addons::Client::new(),
+            engine_start: None,
+            ratings: RatingsState {
+                cache: RatingsCache::default(),
+                sources: Sources::new(),
+                in_flight: HashSet::new(),
+                key_error: None,
+            },
+        }
+    }
+
+    /// The torrent engine's start, beginning it if it isn't running; `true`
+    /// with a start that just began, for the caller to follow. After a
+    /// failed start, the next call tries again.
+    pub fn start_engine(&mut self) -> (EngineStart, bool) {
         if let Some(start) = &self.engine_start
             && !matches!(self.engine, EngineStatus::Failed(_))
         {
-            return start.clone();
+            return (start.clone(), false);
         }
         self.engine = EngineStatus::Starting;
-        cx.notify();
-        let start = runtime::run(Engine::start(self.settings.download_dir()));
-        let task = cx
-            .spawn(async move |this, cx| {
-                let result = start.await.map_err(|err| format!("{err:#}"));
-                this.update(cx, |this, cx| {
-                    this.engine = match &result {
-                        Ok(engine) => EngineStatus::Ready(engine.clone()),
-                        Err(err) => {
-                            log::error!("torrent engine: {err}");
-                            cx.emit(AppEvent::Error(
-                                format!("Torrent engine didn't start: {err}").into(),
-                            ));
-                            EngineStatus::Failed(err.clone())
-                        }
-                    };
-                    cx.notify();
-                })
-                .ok();
-                result
-            })
-            .shared();
-        self.engine_start = Some(task.clone());
-        task
+        let dir = self.settings.download_dir();
+        let start = async move {
+            // Spawned so the session lives on the runtime, whoever polls this.
+            crate::runtime::get()
+                .spawn(Engine::start(dir))
+                .await
+                .map_err(|err| err.to_string())
+                .and_then(|result| result.map_err(|err| format!("{err:#}")))
+        }
+        .boxed()
+        .shared();
+        self.engine_start = Some(start.clone());
+        (start, true)
+    }
+
+    pub fn engine_started(&mut self, result: &Result<Arc<Engine>, String>) {
+        self.engine = match result {
+            Ok(engine) => EngineStatus::Ready(engine.clone()),
+            Err(err) => EngineStatus::Failed(err.clone()),
+        };
     }
 
     // Library
 
-    pub fn add_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
-        if !self.settings.library_folders.contains(&folder) {
-            self.settings.library_folders.push(folder);
-            self.save_settings(cx);
-            self.rescan(false, cx);
+    /// Adds a folder; `false` when it was already there.
+    pub fn add_folder(&mut self, folder: PathBuf) -> bool {
+        if self.settings.library_folders.contains(&folder) {
+            return false;
         }
+        self.settings.library_folders.push(folder);
+        true
     }
 
-    pub fn remove_folder(&mut self, folder: &PathBuf, cx: &mut Context<Self>) {
+    pub fn remove_folder(&mut self, folder: &PathBuf) {
         self.settings.library_folders.retain(|f| f != folder);
-        self.save_settings(cx);
-        self.rescan(false, cx);
     }
 
-    /// Re-reads the library folders and matches new files. `retry_unmatched`
-    /// also asks Cinemeta again about files it didn't know before.
-    pub fn rescan(&mut self, retry_unmatched: bool, cx: &mut Context<Self>) {
+    /// What a rescan starts from, marking one as running; `None` while one
+    /// already is. `retry_unmatched` asks Cinemeta again about files it
+    /// didn't know before.
+    pub fn begin_scan(&mut self, retry_unmatched: bool) -> Option<(Vec<PathBuf>, Library)> {
         if self.scanning {
-            return;
+            return None;
         }
         self.scanning = true;
-        cx.notify();
-
-        let folders = self.settings.library_folders.clone();
         let mut previous = self.library.clone();
         if retry_unmatched {
             previous.misses.clear();
         }
-        let client = self.client.clone();
-        cx.spawn(async move |this, cx| {
-            let scanned = runtime::run(async move {
-                let library = tokio::task::spawn_blocking(move || Library {
-                    files: library::scan(&folders, &previous),
-                    misses: previous.misses,
-                })
-                .await?;
-                Ok(library)
-            })
-            .await;
-            let library = match scanned {
-                Ok(library) => library,
-                Err(err) => {
-                    this.update(cx, |this, cx| {
-                        this.scanning = false;
-                        cx.emit(AppEvent::Error(
-                            format!("Library scan failed: {err:#}").into(),
-                        ));
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-            };
-            // Show the files straight away; posters follow once matched.
-            this.update(cx, |this, cx| {
-                this.library = library.clone();
-                cx.notify();
-            })
-            .ok();
-
-            let matched = runtime::run(async move {
-                let mut library = library;
-                library::match_files(&client, &mut library).await;
-                Ok(library)
-            })
-            .await;
-            this.update(cx, |this, cx| {
-                this.scanning = false;
-                if let Ok(library) = matched {
-                    this.library = library;
-                }
-                if let Err(err) = store::save(Library::FILE, &this.library) {
-                    log::error!("saving the library: {err:#}");
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    pub fn library_titles(&self) -> Vec<LibraryTitle> {
-        self.library.titles()
+        Some((self.settings.library_folders.clone(), previous))
     }
 
     pub fn library_title(&self, meta_id: &str) -> Option<LibraryTitle> {
         self.library.title(meta_id)
-    }
-
-    pub fn recently_added(&self, limit: usize) -> Vec<LibraryTitle> {
-        self.library.recently_added(limit)
     }
 
     /// Local files of a title, or of one of its episodes; copies of a video
@@ -248,43 +191,42 @@ impl AppState {
         self.library.files_for(meta_id, video_id)
     }
 
+    pub fn save_library(&self) {
+        if let Err(err) = store::save(Library::FILE, &self.library) {
+            log::error!("saving the library: {err:#}");
+        }
+    }
+
     // Sources
 
     pub fn sources(&self) -> &[Addon] {
         &self.settings.addons
     }
 
-    /// Validates the addon by fetching its manifest, then adds it.
-    pub fn install_addon(&mut self, url: &str, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
-        let base_url = match addons::normalize_url(url) {
-            Ok(base_url) => base_url,
-            Err(err) => return Task::ready(Err(err)),
-        };
+    /// Fetches an addon's manifest, to validate it before it's added.
+    pub fn fetch_addon(
+        &self,
+        url: &str,
+    ) -> anyhow::Result<impl Future<Output = anyhow::Result<Addon>> + Send + 'static> {
+        let base_url = addons::normalize_url(url)?;
         if self.settings.addons.iter().any(|a| a.base_url == base_url) {
-            return Task::ready(Err(anyhow!("That source is already added")));
+            return Err(anyhow!("That source is already added"));
         }
         let client = self.client.clone();
-        let fetch = runtime::run(async move {
+        Ok(async move {
             let manifest = client.manifest(&base_url).await?;
             Ok(Addon { base_url, manifest })
-        });
-        cx.spawn(async move |this, cx| {
-            let addon = fetch.await?;
-            this.update(cx, |this, cx| {
-                let name = addon.name().to_string();
-                this.settings.addons.push(addon);
-                this.save_settings(cx);
-                cx.emit(AppEvent::Notice(format!("Added {name}").into()));
-                cx.notify();
-            })?;
-            Ok(())
         })
     }
 
-    pub fn remove_addon(&mut self, base_url: &str, cx: &mut Context<Self>) {
+    pub fn add_addon(&mut self, addon: Addon) -> anyhow::Result<()> {
+        self.settings.addons.push(addon);
+        self.save_settings()
+    }
+
+    pub fn remove_addon(&mut self, base_url: &str) -> anyhow::Result<()> {
         self.settings.addons.retain(|a| a.base_url != base_url);
-        self.save_settings(cx);
-        cx.notify();
+        self.save_settings()
     }
 
     // Browsing
@@ -320,35 +262,33 @@ impl AppState {
         cinemeta.into_iter().chain(from_addons).collect()
     }
 
-    pub fn load_catalog(
+    pub fn catalog(
         &self,
         catalog: &CatalogRef,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<Vec<Meta>>> {
+    ) -> impl Future<Output = anyhow::Result<Vec<Meta>>> + Send + 'static {
         let client = self.client.clone();
         let catalog = catalog.clone();
-        cx.background_spawn(runtime::run(async move {
+        async move {
             client
                 .catalog(&catalog.base_url, &catalog.kind, &catalog.id, &[])
                 .await
-        }))
+        }
     }
 
     /// Cinemeta's popular titles of one kind in one genre, for "More like
     /// this".
-    pub fn load_genre(
+    pub fn genre(
         &self,
         kind: &str,
         genre: &str,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<Vec<Meta>>> {
+    ) -> impl Future<Output = anyhow::Result<Vec<Meta>>> + Send + 'static {
         let client = self.client.clone();
         let (kind, genre) = (kind.to_string(), genre.to_string());
-        cx.background_spawn(runtime::run(async move {
+        async move {
             client
                 .catalog(CINEMETA_URL, &kind, "top", &[("genre", &genre)])
                 .await
-        }))
+        }
     }
 
     /// Searches Cinemeta's movies and series, and any addon catalog that takes
@@ -356,12 +296,8 @@ impl AppState {
     pub fn search(
         &self,
         query: &str,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<Vec<CatalogRow>>> {
+    ) -> impl Future<Output = anyhow::Result<Vec<CatalogRow>>> + Send + 'static {
         let query = query.trim().to_string();
-        if query.is_empty() {
-            return Task::ready(Ok(Vec::new()));
-        }
         let mut targets = vec![
             (
                 "Movies".to_string(),
@@ -396,7 +332,10 @@ impl AppState {
             }
         }
         let client = self.client.clone();
-        cx.background_spawn(runtime::run(async move {
+        async move {
+            if query.is_empty() {
+                return Ok(Vec::new());
+            }
             let extra = [("search", query.as_str())];
             let results = join_all(
                 targets
@@ -420,17 +359,16 @@ impl AppState {
                 Some(err) if rows.is_empty() => Err(err),
                 _ => Ok(rows),
             }
-        }))
+        }
     }
 
     /// Full metadata, with episodes for a series. Cinemeta answers IMDb ids;
     /// other ids go to the installed addons that claim them.
-    pub fn load_meta(
+    pub fn meta(
         &self,
         kind: &str,
         id: &str,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<Meta>> {
+    ) -> impl Future<Output = anyhow::Result<Meta>> + Send + 'static {
         let mut providers: Vec<String> = Vec::new();
         if id.starts_with("tt") {
             providers.push(CINEMETA_URL.to_string());
@@ -444,7 +382,7 @@ impl AppState {
         );
         let client = self.client.clone();
         let (kind, id) = (kind.to_string(), id.to_string());
-        cx.background_spawn(runtime::run(async move {
+        async move {
             let mut last_error = anyhow!("no source has details for {id}");
             for base in providers {
                 match client.meta(&base, &kind, &id).await {
@@ -453,16 +391,15 @@ impl AppState {
                 }
             }
             Err(last_error)
-        }))
+        }
     }
 
     /// Asks every installed source for streams of a video.
-    pub fn load_streams(
+    pub fn streams(
         &self,
         kind: &str,
         video_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<StreamResults>> {
+    ) -> impl Future<Output = anyhow::Result<StreamResults>> + Send + 'static {
         let sources: Vec<Addon> = self
             .settings
             .addons
@@ -472,7 +409,7 @@ impl AppState {
             .collect();
         let client = self.client.clone();
         let (kind, video_id) = (kind.to_string(), video_id.to_string());
-        cx.background_spawn(runtime::run(async move {
+        async move {
             let results = join_all(
                 sources
                     .iter()
@@ -502,114 +439,7 @@ impl AppState {
                 }
             }
             Ok(out)
-        }))
-    }
-
-    // Playback
-
-    pub fn play_local(
-        &mut self,
-        file: &LocalFile,
-        item: PlayItem,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<()>> {
-        self.launch(file.path.to_string_lossy().into_owned(), item, cx)
-    }
-
-    /// Plays a stream from a source: directly for URL streams, through the
-    /// torrent engine for torrents.
-    pub fn play_stream(
-        &mut self,
-        found: &FoundStream,
-        item: PlayItem,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<()>> {
-        let stream = found.stream.clone();
-        let Some(info_hash) = stream.info_hash.clone() else {
-            return match stream.url {
-                Some(url) => self.launch(url, item, cx),
-                None => Task::ready(Err(anyhow!("This stream has nothing to play"))),
-            };
-        };
-        let engine = self.engine(cx);
-        cx.spawn(async move |this, cx| {
-            let engine = engine
-                .await
-                .map_err(|err| anyhow!("The torrent engine isn't running: {err}"))?;
-            let url = runtime::run(async move {
-                engine
-                    .stream(
-                        &info_hash,
-                        stream.file_idx.map(|i| i as usize),
-                        stream.behavior_hints.filename.as_deref(),
-                        &stream.trackers(),
-                    )
-                    .await
-            })
-            .await?;
-            this.update(cx, |this, cx| this.launch(url, item, cx))?
-                .await
-        })
-    }
-
-    /// Opens `target` in the default player, resuming where the history says,
-    /// and records progress as the player reports it. The task resolves once
-    /// the player has started.
-    fn launch(
-        &mut self,
-        target: String,
-        item: PlayItem,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<()>> {
-        let start = self.watch.resume_position(&item.video_id);
-        self.watch.started(&item);
-        self.save_watch();
-        cx.notify();
-
-        let title = match &item.episode_label {
-            Some(label) => format!("{} — {label}", item.name),
-            None => item.name.clone(),
-        };
-        let started = runtime::run(player::play(Launch {
-            target,
-            title,
-            start,
-        }));
-        cx.spawn(async move |this, cx| {
-            let mut progress = started.await?;
-            this.update(cx, |_, cx| {
-                cx.spawn(async move |this, cx| {
-                    while let Some(Progress::Position { position, duration }) =
-                        progress.recv().await
-                    {
-                        let alive = this.update(cx, |this, cx| {
-                            this.watch.record(&item, position, duration);
-                            this.save_watch();
-                            cx.notify();
-                        });
-                        if alive.is_err() {
-                            break;
-                        }
-                    }
-                })
-                .detach();
-            })?;
-            Ok(())
-        })
-    }
-
-    pub fn set_watched(&mut self, item: &PlayItem, watched: bool, cx: &mut Context<Self>) {
-        self.watch.set_watched(item, watched);
-        self.save_watch();
-        cx.notify();
-    }
-
-    pub fn watch_entry(&self, video_id: &str) -> Option<&WatchEntry> {
-        self.watch.get(video_id)
-    }
-
-    pub fn continue_watching(&self) -> Vec<WatchEntry> {
-        self.watch.continue_watching()
+        }
     }
 
     // Downloads
@@ -622,47 +452,21 @@ impl AppState {
         }
     }
 
-    pub fn pause_torrent(&self, id: usize, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
-        self.with_engine(cx, move |engine| async move { engine.pause(id).await })
-    }
-
-    pub fn resume_torrent(&self, id: usize, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
-        self.with_engine(cx, move |engine| async move { engine.resume(id).await })
-    }
-
-    pub fn remove_torrent(
-        &self,
-        id: usize,
-        delete_files: bool,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<()>> {
-        self.with_engine(cx, move |engine| async move {
-            engine.remove(id, delete_files).await
-        })
-    }
-
-    fn with_engine<F, Fut>(&self, cx: &mut Context<Self>, f: F) -> Task<anyhow::Result<()>>
-    where
-        F: FnOnce(Arc<Engine>) -> Fut,
-        Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
-    {
+    pub fn ready_engine(&self) -> anyhow::Result<Arc<Engine>> {
         match &self.engine {
-            EngineStatus::Ready(engine) => cx.background_spawn(runtime::run(f(engine.clone()))),
-            _ => Task::ready(Err(anyhow!("The torrent engine isn't running"))),
+            EngineStatus::Ready(engine) => Ok(engine.clone()),
+            _ => Err(anyhow!("The torrent engine isn't running")),
         }
     }
 
     // Persistence
 
-    fn save_settings(&self, cx: &mut Context<Self>) {
-        if let Err(err) = store::save(SETTINGS_FILE, &self.settings) {
-            cx.emit(AppEvent::Error(
-                format!("Couldn't save settings: {err:#}").into(),
-            ));
-        }
+    pub fn save_settings(&self) -> anyhow::Result<()> {
+        store::save(SETTINGS_FILE, &self.settings)
+            .map_err(|err| anyhow!("Couldn't save settings: {err:#}"))
     }
 
-    fn save_watch(&self) {
+    pub fn save_watch(&self) {
         if let Err(err) = store::save(WatchState::FILE, &self.watch) {
             log::error!("saving watch history: {err:#}");
         }
@@ -671,19 +475,12 @@ impl AppState {
 
 // Ratings
 
-use std::collections::HashMap;
-
-use crate::ratings::{Fetched, OmdbError, Ratings, RatingsCache, Sources};
-
-/// A ratings fetch, shared by everyone waiting on the same title.
-type RatingsFetch = Shared<Task<Result<Option<Ratings>, String>>>;
-
 /// Review scores: the disk cache, fetches in flight, and any problem with
 /// the OMDb key.
 struct RatingsState {
     cache: RatingsCache,
     sources: Sources,
-    in_flight: HashMap<String, RatingsFetch>,
+    in_flight: HashSet<String>,
     /// The OMDb key itself failed (invalid, or out of quota). Only Wikidata
     /// is asked until the key changes or the problem expires, so a bad key
     /// doesn't burn requests.
@@ -708,76 +505,58 @@ impl RatingsState {
         Self {
             cache: RatingsCache::load(),
             sources: Sources::new(),
-            in_flight: HashMap::new(),
+            in_flight: HashSet::new(),
             key_error: None,
         }
     }
 }
 
-impl AppState {
-    /// Cached scores for an IMDb id, possibly older than a week. Never
-    /// fetches; use [`Self::load_ratings`] for that.
+/// A ratings fetch to run: the key it uses, and the request.
+pub type RatingsRequest = (Option<String>, BoxFuture<'static, anyhow::Result<Fetched>>);
+
+impl Core {
+    /// Cached scores for an IMDb id, possibly older than a week.
     pub fn ratings(&self, imdb_id: &str) -> Option<Ratings> {
         self.ratings.cache.get(imdb_id).map(|e| e.ratings.clone())
     }
 
-    /// Scores for a title, from the cache when fresh, otherwise fetched once
-    /// however many views ask: Wikidata first, then OMDb for what it lacks.
-    /// `Ok(None)` when the id isn't an IMDb id. Observers are notified when
-    /// new scores arrive.
+    /// The request that refreshes a title's scores: Wikidata first, then
+    /// OMDb for what it lacks. `None` when the cache is fresh, the id isn't
+    /// an IMDb id, or a fetch for it is already running.
     ///
-    /// Call this for the title being shown, never for catalog rows: the free
+    /// Ask only for the title on screen, never for catalog rows: the free
     /// OMDb key allows 1000 requests a day.
-    pub fn load_ratings(
-        &mut self,
-        imdb_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<Option<Ratings>>> {
+    pub fn ratings_request(&mut self, imdb_id: &str) -> Option<RatingsRequest> {
         if !crate::ratings::is_imdb_id(imdb_id) {
-            return Task::ready(Ok(None));
+            return None;
         }
-        if let Some(entry) = self.ratings.cache.get(imdb_id)
-            && entry.is_fresh(store::now())
+        if self
+            .ratings
+            .cache
+            .get(imdb_id)
+            .is_some_and(|e| e.is_fresh(store::now()))
         {
-            return Task::ready(Ok(Some(entry.ratings.clone())));
+            return None;
+        }
+        if !self.ratings.in_flight.insert(imdb_id.to_string()) {
+            return None;
         }
         let key = self.usable_omdb_key();
-
-        let fetch = match self.ratings.in_flight.get(imdb_id) {
-            Some(fetch) => fetch.clone(),
-            None => {
-                let id = imdb_id.to_string();
-                let sources = self.ratings.sources.clone();
-                let request = runtime::run({
-                    let (key, id) = (key.clone(), id.clone());
-                    async move { sources.fetch(key.as_deref(), &id).await }
-                });
-                let fetch = cx
-                    .spawn({
-                        let id = id.clone();
-                        async move |this, cx| {
-                            let result = request.await;
-                            this.update(cx, |this, cx| this.ratings_fetched(&id, key, result, cx))
-                                .unwrap_or_else(|err| Err(format!("{err:#}")))
-                        }
-                    })
-                    .shared();
-                self.ratings.in_flight.insert(id, fetch.clone());
-                fetch
-            }
+        let sources = self.ratings.sources.clone();
+        let id = imdb_id.to_string();
+        let request = {
+            let key = key.clone();
+            async move { sources.fetch(key.as_deref(), &id).await }.boxed()
         };
-        cx.spawn(async move |_, _| fetch.await.map_err(anyhow::Error::msg))
+        Some((key, request))
     }
 
-    fn ratings_fetched(
+    pub fn ratings_fetched(
         &mut self,
         imdb_id: &str,
         key: Option<String>,
         result: anyhow::Result<Fetched>,
-        cx: &mut Context<Self>,
-    ) -> Result<Option<Ratings>, String> {
-        // If the key changed meanwhile, this may drop a newer fetch for the
-        // same title; that only costs sharing it.
+    ) {
         self.ratings.in_flight.remove(imdb_id);
         let same_key = self.usable_omdb_key() == key;
         // A key exists but was held back because it had failed.
@@ -789,59 +568,47 @@ impl AppState {
             }) => (Some(ratings), omdb_error),
             Err(err) => (None, Some(err)),
         };
-        let mut retry_soon = false;
-        let message = omdb_error.map(|err| {
-            let message = format!("{err:#}");
+        // Whatever went wrong with OMDb, keep what Wikidata had until it answers.
+        let mut retry_soon = omdb_error.is_some();
+        if let Some(err) = &omdb_error {
             let key_problem = err
                 .downcast_ref::<OmdbError>()
                 .is_some_and(OmdbError::is_key_error);
             if key_problem && same_key {
+                let message = format!("{err:#}");
                 log::warn!("ratings: {message}");
                 self.ratings.key_error = Some(KeyError {
-                    message: message.clone(),
+                    message,
                     retry_at: store::now() + crate::ratings::RETRY_SECS,
                 });
             }
-            // Whatever went wrong, keep what Wikidata had until OMDb answers.
-            retry_soon = true;
-            message
-        });
-        let Some(ratings) = ratings else {
-            cx.notify();
-            return Err(message.unwrap_or_default());
-        };
+        }
         // Scores fetched for an older key may lack what the new one adds;
         // the next view fetches again.
-        if !same_key {
-            cx.notify();
-            return Ok(Some(ratings));
-        }
+        let Some(ratings) = ratings.filter(|_| same_key) else {
+            return;
+        };
         // Without a key that is only resting, OMDb may add more soon.
-        if !ratings.has_critics() && held_back {
-            retry_soon = true;
-        }
+        retry_soon |= !ratings.has_critics() && held_back;
         if retry_soon {
-            self.ratings.cache.insert_briefly(imdb_id, ratings.clone());
+            self.ratings.cache.insert_briefly(imdb_id, ratings);
         } else {
-            self.ratings.cache.insert(imdb_id, ratings.clone());
+            self.ratings.cache.insert(imdb_id, ratings);
         }
         self.ratings.cache.save();
-        cx.notify();
-        Ok(Some(ratings))
     }
 
     /// Saves the user's own OMDb key (`None` or blank removes it, going back
     /// to the built-in key), forgets any problem the old key had, and drops
     /// cached titles the new key might fill in.
-    pub fn set_omdb_key(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_omdb_key(&mut self, key: Option<String>) -> anyhow::Result<()> {
         let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
         self.settings.omdb_api_key = key;
         self.ratings.key_error = None;
         self.ratings.in_flight.clear();
         self.ratings.cache.drop_incomplete();
         self.ratings.cache.save();
-        self.save_settings(cx);
-        cx.notify();
+        self.save_settings()
     }
 
     /// Whether the user saved a key of their own.
@@ -855,37 +622,32 @@ impl AppState {
         Some(error.message.as_str())
     }
 
-    /// Checks `key` (blank: the key in use) with one OMDb request, without
-    /// caching anything. Success with the key in use clears its error.
-    pub fn test_omdb_key(
+    /// One OMDb request with `key` (blank: the key in use), caching nothing.
+    pub fn omdb_test(
         &self,
         key: &str,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<Ratings>> {
+    ) -> anyhow::Result<(
+        String,
+        impl Future<Output = anyhow::Result<Ratings>> + Send + 'static,
+    )> {
         let key = match key.trim() {
             "" => self.omdb_key(),
             typed => Some(typed.to_string()),
-        };
-        let Some(key) = key else {
-            return Task::ready(Err(anyhow!("Enter a key first")));
-        };
+        }
+        .ok_or_else(|| anyhow!("Enter a key first"))?;
         let sources = self.ratings.sources.clone();
-        let request = runtime::run({
+        let request = {
             let key = key.clone();
             async move { sources.test_omdb(&key).await }
-        });
-        cx.spawn(async move |this, cx| {
-            let ratings = request.await?;
-            this.update(cx, |this, cx| {
-                if this.omdb_key().as_deref() == Some(key.as_str())
-                    && this.ratings.key_error.take().is_some()
-                {
-                    cx.notify();
-                }
-            })
-            .ok();
-            Ok(ratings)
-        })
+        };
+        Ok((key, request))
+    }
+
+    /// A test of `key` passed: if it's the key in use, its error is over.
+    pub fn omdb_key_works(&mut self, key: &str) {
+        if self.omdb_key().as_deref() == Some(key) {
+            self.ratings.key_error = None;
+        }
     }
 
     fn own_omdb_key(&self) -> Option<String> {

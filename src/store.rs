@@ -2,6 +2,7 @@
 
 use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
@@ -75,8 +76,19 @@ pub fn load<T: DeserializeOwned + Default>(name: &str) -> T {
     }
 }
 
+static READ_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Stops [`save`] from writing anything, for headless renders: a preview reads
+/// the real library and history but must never change them.
+pub fn set_read_only() {
+    READ_ONLY.store(true, Ordering::Relaxed);
+}
+
 /// Writes `value` to `name` in the data folder, replacing it atomically.
 pub fn save<T: Serialize>(name: &str, value: &T) -> anyhow::Result<()> {
+    if READ_ONLY.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
     let tmp = dir.join(format!("{name}.tmp"));
