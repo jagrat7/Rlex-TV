@@ -393,7 +393,7 @@ pub fn scan(folders: &[PathBuf], previous: &Library) -> Vec<LocalFile> {
 }
 
 /// The same file however it's reached, hard links included: its inode on Unix, its volume
-/// and file index on Windows, else its real path.
+/// and file ID on Windows, else its real path.
 fn file_identity(path: &Path, metadata: &std::fs::Metadata) -> String {
     #[cfg(unix)]
     {
@@ -405,16 +405,40 @@ fn file_identity(path: &Path, metadata: &std::fs::Metadata) -> String {
     {
         let _ = metadata;
         #[cfg(windows)]
-        if let Ok(info) = winapi_util::Handle::from_path_any(path)
-            .and_then(|handle| winapi_util::file::information(&handle))
-        {
-            return format!("{}:{}", info.volume_serial_number(), info.file_index());
+        if let Some(id) = windows_file_id(path) {
+            return id;
         }
         std::fs::canonicalize(path)
             .unwrap_or_else(|_| path.to_path_buf())
             .display()
             .to_string()
     }
+}
+
+/// A file's volume and full 128-bit file ID, the same for every hard link to it. The older
+/// 64-bit file index isn't unique on ReFS (Dev Drives), where it could merge two videos.
+#[cfg(windows)]
+fn windows_file_id(path: &Path) -> Option<String> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+    };
+    // No access rights are needed to read a file's ID.
+    let file = std::fs::OpenOptions::new().access_mode(0).open(path).ok()?;
+    // SAFETY: FILE_ID_INFO is plain data, and the call writes at most its size.
+    let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut info).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    (ok != 0).then(|| {
+        let id = u128::from_le_bytes(info.FileId.Identifier);
+        format!("{}:{id:x}", info.VolumeSerialNumber)
+    })
 }
 
 pub fn is_video(path: &Path) -> bool {
