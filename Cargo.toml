@@ -30,6 +30,10 @@ urlencoding = "2"
 walkdir = "2"
 zbus = { version = "5", default-features = false, features = ["async-io"] }
 
+# Tells hard links apart from copies when scanning (a file's volume and index).
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
+
 [profile.dev]
 debug = "limited"
 # Rune's runtime is generic over the app's state, so most of its per-frame work is compiled

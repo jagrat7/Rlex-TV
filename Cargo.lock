@@ -4282,6 +4282,7 @@ dependencies = [
  "url",
  "urlencoding",
  "walkdir",
+ "winapi-util",
  "zbus 5.19.0",
 ]
 

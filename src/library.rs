@@ -392,7 +392,8 @@ pub fn scan(folders: &[PathBuf], previous: &Library) -> Vec<LocalFile> {
     files
 }
 
-/// The same file however it's reached: its inode on Unix, else its real path.
+/// The same file however it's reached, hard links included: its inode on Unix, its volume
+/// and file index on Windows, else its real path.
 fn file_identity(path: &Path, metadata: &std::fs::Metadata) -> String {
     #[cfg(unix)]
     {
@@ -403,6 +404,12 @@ fn file_identity(path: &Path, metadata: &std::fs::Metadata) -> String {
     #[cfg(not(unix))]
     {
         let _ = metadata;
+        #[cfg(windows)]
+        if let Ok(info) = winapi_util::Handle::from_path_any(path)
+            .and_then(|handle| winapi_util::file::information(&handle))
+        {
+            return format!("{}:{}", info.volume_serial_number(), info.file_index());
+        }
         std::fs::canonicalize(path)
             .unwrap_or_else(|_| path.to_path_buf())
             .display()
