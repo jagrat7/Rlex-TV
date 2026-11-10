@@ -51,11 +51,11 @@ and the icons from `assets/logo/` into the hicolor theme.
 
 ### Windows
 
-Each `v*` tag publishes a Windows build as a pre-release, built on GitHub's Windows runners
-(`.github/workflows/windows-release.yml`).
+Every release has a Windows build, made on GitHub's Windows runners (see
+[Releasing](#releasing)). To get the latest:
 
 ```powershell
-curl.exe -LO https://github.com/jagrat7/Rlex-TV/releases/download/v0.1.0/rlex-windows-x64.exe
+curl.exe -LO https://github.com/jagrat7/Rlex-TV/releases/latest/download/rlex-windows-x64.exe
 .\rlex-windows-x64.exe
 ```
 
@@ -183,3 +183,30 @@ cargo run -- --script nav.json --snap after.png --at mark:end # taps, keys and s
 
 A headless run reads your real library and history but never saves anything, and waits for the
 network before each frame, so it shows what a window would a moment after launch.
+
+## Releasing
+
+`.github/workflows/windows-release.yml` tests, builds and publishes the Windows exe. There are
+two ways to start a release, both from `main`:
+
+- **The button.** Actions → Windows build → Run workflow, then pick `patch`, `minor` or `major`,
+  or type an exact version. The workflow writes the new version into `Cargo.toml` and
+  `Cargo.lock`, commits `Release vX` to `main`, and tags that commit. Run `git pull` afterwards.
+
+  ```sh
+  gh workflow run windows-release.yml                         # patch: 0.2.0 → 0.2.1
+  gh workflow run windows-release.yml -f bump=minor           # 0.2.0 → 0.3.0
+  gh workflow run windows-release.yml -f version=1.0.0-beta.1
+  ```
+
+- **A version bump.** Change `version` in `Cargo.toml`, run `cargo check` so `Cargo.lock`
+  follows, and push or merge to `main`. Pushes that touch `Cargo.toml` without a new version
+  release nothing.
+
+A version with a suffix (`0.3.0-beta.1`), or the button's "pre-release" box, makes a
+pre-release; anything else is a full release, which `/releases/latest` points to. Bumping a
+pre-release finishes it: `patch` on `0.3.0-beta.1` releases `0.3.0`. `scripts/release-version.sh`
+works out the next version.
+
+Started on any other branch, the button builds and tests without publishing. Pull requests that
+touch the build do the same.
