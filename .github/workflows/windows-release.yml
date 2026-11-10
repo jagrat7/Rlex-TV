@@ -179,7 +179,7 @@ jobs:
           path: dist/rlex-windows-x64.exe
 
   release:
-    name: Publish v${{ needs.plan.outputs.version }}
+    name: Publish
     needs: [plan, build]
     if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
@@ -192,6 +192,21 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-manifest
+
+      # A version bump reverted on main while this run built shouldn't still ship. (The
+      # button's own push below already fails if main moved.)
+      - name: Check main still has this version
+        if: needs.plan.outputs.stamp != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          git fetch --depth=1 origin main
+          on_main=$(git show FETCH_HEAD:Cargo.toml | sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p')
+          if [[ $on_main != "$VERSION" ]]; then
+            echo "::error::main's Cargo.toml now says $on_main, not $VERSION. Not publishing v$VERSION."
+            exit 1
+          fi
 
       # Commits first, so the tag lands on a commit whose Cargo.toml says the same version.
       # If main moved on since the run started, the push fails and nothing is published.
